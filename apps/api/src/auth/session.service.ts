@@ -60,6 +60,7 @@ export class SessionService {
         email: user.email,
         name: user.name,
         role: user.role,
+        emailVerified: user.emailVerifiedAt !== null,
         createdAt: user.createdAt,
       },
     };

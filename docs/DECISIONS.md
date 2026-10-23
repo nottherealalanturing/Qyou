@@ -72,11 +72,18 @@ fits the pnpm `allowBuilds` deny-by-default policy). Parameters follow the OWASP
 pipe) with OpenAPI request schemas from `z.toJSONSchema`. Avoids depending on a third-party
 package's Nest 12 / zod 4 support. Response schemas are not yet documented in OpenAPI.
 
-**D-017 In-house in-memory rate limiter instead of `@nestjs/throttler`.** Needed per-route IP
-limits _plus_ per-account/per-(account, IP) failure counters with clear-on-success, which the
-throttler's model does not express. Known limitation: per-process; replace the store (Redis or
-PostgreSQL) before running more than one API instance. `TRUST_PROXY` must equal the real number of
-trusted proxies, otherwise IP limits and audit IPs are wrong or spoofable.
+**D-017 Rate limiting: in-house limiter, now PostgreSQL-backed (revised in M1.2).** Needed per-route
+IP limits _plus_ per-account/per-(account, IP) failure counters with clear-on-success, which
+`@nestjs/throttler`'s model does not express. M1.1 shipped an in-memory sliding window; its
+documented flaw (per-process: N instances ⇒ N× the allowed guesses, reset on restart) directly
+weakens the password-change and verification endpoints added in M1.2, so it was replaced.
+Now: `rate_limit_counters(key sha256, windowStart, count)` with one atomic
+`INSERT … ON CONFLICT DO UPDATE … WHERE count < limit` — correct across instances and restarts
+with no new infrastructure (tested with three independent connection pools under concurrency).
+Trade-offs: fixed windows (up to 2× burst across a boundary), one extra query per limited
+request, fails closed if the DB is down. Alternatives considered: Redis (new infra to run and
+secure for a modest request rate), sliding-log table (heavier writes). Revisit with Redis only if
+limiter load shows up in profiling (Phase 6). `TRUST_PROXY` must still equal the real proxy count.
 
 **D-018 Browser → web origin only (Next `rewrites` proxy for `/api/v1/*`).** Alternative: browser
 calls the API origin with `credentials: include` + CORS. The proxy keeps the cookie first-party,
@@ -88,22 +95,101 @@ Origin-based CSRF check use one allow-listed origin. Cost: rewrites are resolved
 all state-changing endpoints are JSON and every browser request carries `Origin`. Revisit if
 non-browser cookie clients or cross-site embedding are introduced.
 
-**D-020 Reset token in the URL fragment, mail delivery fire-and-forget.** Fragment never reaches
-servers/logs/Referer; the page strips it from history after reading. Sending mail without awaiting
-keeps the response (and timing) identical for unknown accounts; a failed send is logged by error
-name only. Trade-off: no retry/outbox — a transient SMTP failure loses that email (the user can
-request another). A transactional outbox belongs with the notifications work (Phase 3).
+**D-020 Reset/verification tokens in the URL fragment; mail delivery stays fire-and-forget
+(deliberately deferred in M1.2).** The fragment never reaches servers/logs/Referer; the pages strip
+it from history after reading. Sending mail without awaiting keeps responses (and timing)
+identical for unknown accounts; a failed send is logged by error name only. **Why no transactional
+outbox yet:** an outbox must persist the message body, and these bodies contain the raw one-time
+token — persisting it would break the "store only hashes" rule unless payloads are encrypted at
+rest (key management we do not have). Mitigations that make loss tolerable today: every token
+email has a user-driven resend (verification: authenticated resend; reset: request again), the
+admin bootstrap reports `emailSent: false` explicitly, and tokens are 24 h/30 min. **Revisit:**
+Phase 3 notifications, designed as an outbox that stores template + recipient and mints the token
+at send time (so no secret is stored) with retries and a dead-letter view.
 
-**D-021 Registration reveals duplicate emails (409).** Fully enumeration-safe sign-up needs an
-email-first confirmation flow; deferred until email verification exists. Mitigated by the
-registration rate limit. Password reset and login are enumeration-safe.
+**D-021 Registration still reveals duplicate emails (409) — re-reviewed and deferred in M1.2.**
+Enumeration-safe sign-up (always "check your email") means an email-first flow: no session until
+the address is verified. That would hurt the core marketplace funnel (register → immediately book)
+and now conflicts with the chosen policy that only _commitments_ require a verified email. What we
+have instead: registration is rate-limited (10/h/IP), login and reset are fully enumeration-safe,
+and verification links reveal nothing. Residual risk: an attacker can test whether an address has an
+account (low severity, rate-limited). **Revisit before public launch / Phase 6 abuse work**, with
+options: (a) per-email + CAPTCHA-style friction on duplicates, (b) email-first registration for
+high-risk roles only (assistants), (c) full email-first sign-up.
 
-**D-022 Email verification not part of M1.1.** Accounts are usable immediately; `emailVerifiedAt`
-is deliberately absent from the schema until the verification flow (needed before payments and
-assistant onboarding) is built.
+**D-022 Email verification — implemented in M1.2.** Single-use 24 h tokens bound to the address,
+hash-only storage, idempotent confirm, concurrency-safe, rate-limited; completing a password reset
+also verifies. Policy (what requires verification) is in ARCHITECTURE.md → "Email verification
+policy"; accounts remain usable for non-committing actions without it.
 
 **D-023 Local Mailpit on host ports 1052 (SMTP) / 8052 (UI).** 1025/8025 are used by another
 local project.
+
+**D-024 Administrators are created by a CLI only; ADMIN is never grantable over HTTP.** Alternatives:
+seed via env credentials, an install-time setup page, or admin-grants-admin over the API. Chosen
+because any HTTP path to ADMIN is an escalation target. The CLI never handles a password: it
+creates a verified account with an unknowable random password and emails a 24 h set-password link
+(so no credential passes through argv, env, shell history or logs). Dry-run by default, refuses if
+an administrator exists (`--additional`), never promotes/edits an existing account, serialised by
+an advisory lock. Cost: needs working SMTP at bootstrap; recovery is the normal "forgot password"
+flow. An administrator who loses their mailbox needs another administrator or direct DB access —
+there is deliberately no HTTP recovery.
+
+**D-025 Single role per account; roles assigned by an administrator through one service.**
+`CUSTOMER` is the only self-service role. ASSISTANT and BUSINESS_STAFF are granted by an
+administrator (later driven by onboarding approval flows, which must call the same service) and
+require a verified email. Multiple simultaneous roles (e.g. a customer who is also an assistant)
+are not modelled; the assistant profile (M1.4) will hang off the user so an assistant still
+books as a customer under the same account — revisit if separate permissions per hat are needed.
+
+**D-026 Authorization architecture.** Global guards in a fixed, tested order (CSRF → session →
+roles → verified email); decorators declare, guards enforce; fail closed on misconfiguration;
+authorization data read from the DB each request (no stale privileges, no cached claims);
+resource-level checks are query-scoped in services with "not yours ⇒ 404". Alternatives: CASL /
+policy-engine library (not needed for four roles; reconsider if per-resource rules multiply in
+Phase 2+), JWT role claims (stale until expiry — rejected with D-011).
+
+**D-027 Changing the password rotates the current session and revokes all others.** Alternative:
+keep the current session unchanged. Rotation also invalidates any copy of the current token (the
+attacker may have exactly that), at the cost of one new cookie. The current device stays logged in.
+"Log out everywhere" revokes all sessions including the current one.
+
+**D-028 Audit immutability by two layers: least-privilege runtime role + triggers; no FK on
+`audit_logs`.** Alternatives: triggers only (a superuser-owned API could bypass), separate audit
+database/service (more infra), hash-chained rows (tamper-evident but heavier; deferred to Phase 6
+together with off-box shipping). Full threat model and limits: ARCHITECTURE.md → "Audit-log
+integrity". Consequence: migrations must run as the owner role and the API as `qyou_runtime`, so
+the codebase now has two connection strings (D-029).
+
+**D-029 Two database identities: owner (`MIGRATION_DATABASE_URL`) vs runtime (`DATABASE_URL`).**
+`prisma.config.ts` prefers the owner URL for the CLI; the API and e2e tests use the runtime role;
+test setup uses `TEST_ADMIN_DATABASE_URL`. Roles are cluster-level and created by infra
+(`docker/dev-db-roles.sql` locally/CI; template for production in the RUNBOOK); the migration
+creates the NOLOGIN group role only if absent so a fresh database still migrates. The local owner
+is a superuser (Docker image behaviour); production must use a non-superuser owner.
+
+**D-030 Web CSP: nonce-based, set in `proxy.ts`, relaxed only in development.** Alternatives:
+hash-based/static CSP (Next inline scripts change per build), `unsafe-inline` (defeats the point),
+report-only first (we could test directly against a production build). Production has no
+`unsafe-inline`/`unsafe-eval`; dev adds `unsafe-eval` (React) and `style-src 'unsafe-inline'`
+because Next's dev tooling injects un-nonced style elements (observed: empty-string-hash
+violations in the browser console). The strict policy is verified against the production build
+(`pnpm verify:headers`, CI step, unit tests). All pages must stay dynamic. No CSP reporting yet.
+
+**D-031 Browser automation suite (Playwright) — deferred to M1.7, with interim controls.** A real
+browser suite needs a browser download, a test-environment orchestration story (API + web + DB +
+Mailpit) and flake management; that is its own milestone and was already planned (M1.7). It would
+not have changed any M1.2 security conclusion because the security properties are enforced and
+tested server-side. Interim controls added now: jsdom component tests (including regression
+tests for real bugs found in the browser), `pnpm verify:headers` against a production build, and
+manual browser runs recorded in PROGRESS.md. Trigger to pull forward: first UI-heavy feature
+(M1.6) or any CSP-related regression.
+
+**D-032 CI is updated but remains unexecuted.** GitHub Actions cannot run locally and nothing has
+been pushed; the workflow was updated for the runtime/owner roles and header verification, its
+YAML parses, and every command in it was run locally in the same order. It is **not** evidence
+that CI passes. First real run happens when the owner pushes; expect possible environment
+differences (Postgres service superuser, `psql` availability, `next start` readiness).
 
 ## Open (need input before the milestone that depends on them)
 

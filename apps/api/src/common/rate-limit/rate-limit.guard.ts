@@ -30,7 +30,7 @@ export class RateLimitGuard implements CanActivate {
     private readonly limiter: RateLimiter,
   ) {}
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const options = this.reflector.get<RateLimitOptions | undefined>(
       RATE_LIMIT_KEY,
       context.getHandler(),
@@ -39,7 +39,7 @@ export class RateLimitGuard implements CanActivate {
 
     const http = context.switchToHttp();
     const ip = clientIp(http.getRequest<Request>()) ?? 'unknown';
-    const result = this.limiter.hit(
+    const result = await this.limiter.hit(
       `ip:${options.name}:${ip}`,
       options.limit,
       options.windowSeconds * 1000,

@@ -1,29 +1,28 @@
 import { Module, type OnApplicationBootstrap, type OnModuleDestroy, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { APP_GUARD } from '@nestjs/core';
 import type { Env } from '../config/env.js';
+import { AccountController } from './account.controller.js';
+import { AccountSecurityService } from './account-security.service.js';
 import { AuthController } from './auth.controller.js';
 import { AuthService } from './auth.service.js';
-import { CsrfGuard } from './csrf.guard.js';
+import { EmailVerificationService } from './email-verification.service.js';
 import { PasswordService } from './password.service.js';
-import { SessionAuthGuard } from './session-auth.guard.js';
 import { SessionCookieService } from './session-cookie.service.js';
 import { SessionService } from './session.service.js';
 
 const PURGE_INTERVAL_MS = 60 * 60 * 1000;
 
 @Module({
-  controllers: [AuthController],
+  controllers: [AuthController, AccountController],
   providers: [
     AuthService,
+    AccountSecurityService,
+    EmailVerificationService,
     PasswordService,
     SessionService,
     SessionCookieService,
-    // Order matters: CSRF origin check first, then session authentication.
-    { provide: APP_GUARD, useClass: CsrfGuard },
-    { provide: APP_GUARD, useClass: SessionAuthGuard },
   ],
-  exports: [SessionService],
+  exports: [SessionService, SessionCookieService, AuthService, PasswordService],
 })
 export class AuthModule implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(AuthModule.name);

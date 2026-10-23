@@ -71,7 +71,19 @@ export const passwordResetConfirmSchema = z.strictObject({
   password: newPassword,
 });
 
+export const emailVerificationConfirmSchema = z.strictObject({ token: resetToken });
+
+export const changePasswordSchema = z.strictObject({
+  currentPassword: z
+    .string('Enter your current password')
+    .min(1, 'Enter your current password')
+    .max(128),
+  newPassword,
+});
+
 export class RegisterDto extends createZodDto(registerSchema) {}
 export class LoginDto extends createZodDto(loginSchema) {}
 export class PasswordResetRequestDto extends createZodDto(passwordResetRequestSchema) {}
 export class PasswordResetConfirmDto extends createZodDto(passwordResetConfirmSchema) {}
+export class EmailVerificationConfirmDto extends createZodDto(emailVerificationConfirmSchema) {}
+export class ChangePasswordDto extends createZodDto(changePasswordSchema) {}

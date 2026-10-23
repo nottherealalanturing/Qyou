@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start --port 3000",
     "typecheck": "next typegen && tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "verify:headers": "node scripts/verify-security-headers.mjs"
   },
   "dependencies": {
     "next": "^16.4.2",

@@ -28,9 +28,11 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      # Used by `prisma generate`/validate and as the API's database in e2e tests.
-      DATABASE_URL: postgresql://qyou:qyou_ci_password@localhost:5432/qyou_test?schema=public
-      TEST_DATABASE_URL: postgresql://qyou:qyou_ci_password@localhost:5432/qyou_test?schema=public
+      # The API connects as the least-privilege RUNTIME role (created from docker/dev-db-roles.sql),
+      # exactly like production; migrations and test setup use the OWNER role.
+      DATABASE_URL: postgresql://qyou_runtime:qyou_runtime_dev_password@localhost:5432/qyou_test?schema=public
+      TEST_DATABASE_URL: postgresql://qyou_runtime:qyou_runtime_dev_password@localhost:5432/qyou_test?schema=public
+      TEST_ADMIN_DATABASE_URL: postgresql://qyou:qyou_ci_password@localhost:5432/qyou_test?schema=public
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -43,7 +45,14 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
-      - name: Apply migrations to the test database
+      - name: Create the runtime database roles
+        run: psql "postgresql://qyou:qyou_ci_password@localhost:5432/postgres" -v ON_ERROR_STOP=1 -f docker/dev-db-roles.sql
+      - name: Apply migrations to the test database (as the owner role)
         run: pnpm db:deploy:test
       - run: pnpm test:e2e
       - run: pnpm build
+      - name: Verify web security headers / CSP against the production build
+        run: |
+          pnpm --filter @qyou/web start &
+          for i in $(seq 1 30); do curl -sf -o /dev/null http://localhost:3000/login && break; sleep 1; done
+          pnpm --filter @qyou/web verify:headers

@@ -1,19 +1,20 @@
 # Qyou — Architecture
 
-Status: **Phase 0 and M1.1 (authentication) implemented; everything else is design intent** and is
-marked as such. When code and this document disagree, the code wins — fix the document.
+Status: **Phase 0, M1.1 (authentication) and M1.2 (authorization & account security) implemented;
+everything else is design intent** and is marked as such. When code and this document disagree, the code wins — fix the document.
 
 ## Shape
 
 Modular monolith in a pnpm TypeScript monorepo. No microservices.
 
 ```
-apps/api            NestJS 12 (ESM) REST API, Prisma 7 → PostgreSQL 17     [implemented: health, auth]
-apps/web            Next.js 16 App Router, React 19, Tailwind 4             [implemented: shell, /status, auth pages]
+apps/api            NestJS 12 (ESM) REST API, Prisma 7 → PostgreSQL 17     [implemented: health, auth, authz, admin]
+apps/web            Next.js 16 App Router, React 19, Tailwind 4             [implemented: shell, auth/account pages, CSP]
 packages/config     Shared tsconfig bases                                   [implemented]
 packages/contracts  Shared API schemas/types — only when it earns its keep  [not created; D-007]
 docs/               Product, architecture, decisions, roadmap, progress, runbook
 docker-compose.yml  Local PostgreSQL (5452; DBs qyou, qyou_test) + Mailpit (SMTP 1052, UI 8052)
+docker/             DB init + dev-db-roles.sql (least-privilege runtime role)
 ```
 
 The browser talks only to the **web origin**: Next.js rewrites `/api/v1/*` to the API
@@ -29,6 +30,7 @@ OpenAPI at `/docs` and `/docs/openapi.json`. The web client types will be genera
 - `prisma/` — global `PrismaService` (Prisma 7 + `@prisma/adapter-pg`). Generated client is in
   `src/generated/prisma` (git-ignored).
 - `health/` — `live` (process) and `ready` (real `SELECT 1`; 503 + body when DB down). `@Public()`.
+- `app.guards.ts` — the global guards **in execution order** (see Authorization). Pinned by a test.
 - `app.setup.ts` — shared bootstrap used by `main.ts` and the e2e tests: trust-proxy setting,
   Helmet (CSP relaxed for `/docs` only), JSON body limit (16 KiB; default body parser disabled so
   the limit applies — create the app with `APP_OPTIONS`), `cookie-parser`, CORS allow-list,
@@ -38,12 +40,16 @@ OpenAPI at `/docs` and `/docs/openapi.json`. The web client types will be genera
   `zodBodySchema()` derives the OpenAPI request schema from the same zod schema.
 - `common/http` — `AllExceptionsFilter` (generic 500; maps body-parser 413/400; sets
   `Retry-After` on 429; logs unexpected errors by name/code only, never messages).
-- `common/rate-limit` — in-memory sliding-window `RateLimiter` + `@RateLimit()`/`RateLimitGuard`
-  (per client IP). **Per-process state**: correct for one API instance; a shared store is needed
-  before scaling out (Phase 6, tracked in ROADMAP).
+- `common/rate-limit` — PostgreSQL-backed fixed-window `RateLimiter` (`rate_limit_counters`, one
+  atomic `INSERT … ON CONFLICT DO UPDATE … WHERE count < limit`) + `@RateLimit()`/`RateLimitGuard`
+  (per client IP). Shared by every API instance and restart-proof; keys are SHA-256-hashed. Fixed
+  windows allow up to 2× bursts across a boundary (D-017). Fails closed if the DB is down.
 - `audit/` — `AuditService.record()`; inside the caller's transaction when given a `tx`.
 - `mail/` — `MailService` abstraction + SMTP implementation (nodemailer). Local: Mailpit.
-  Delivery is fire-and-forget from the request (no outbox yet; see limitations).
+  Delivery is fire-and-forget from the request (no outbox; deliberate deferral, D-020).
+- `authz/` — `@Roles()`, `@RequireVerifiedEmail()`, `@AdminOnly()` and their global guards.
+- `admin/` — administrator-only user management (role assignment) and the bootstrap service used
+  by the CLI (`src/cli/create-admin.ts`).
 - `auth/` — see below.
 
 ### Authentication (M1.1, implemented)
@@ -63,11 +69,154 @@ OpenAPI at `/docs` and `/docs/openapi.json`. The web client types will be genera
 | Secrets in logs | Nothing logs bodies; the exception filter logs error name/code only; verified by an e2e test that captures stdout/stderr across every flow                                                                                                                                                                                 |
 
 Endpoints (`/api/v1/auth`): `POST register`, `POST login`, `POST logout` (idempotent, public),
-`GET me`, `POST password-reset/request`, `POST password-reset/confirm`.
+`GET me`, `POST password-reset/request`, `POST password-reset/confirm`, and (M1.2)
+`POST email-verification/request|confirm`, `POST password/change`, `POST logout-all`,
+`GET sessions`, `DELETE sessions/:id`. Admin: `PATCH /api/v1/admin/users/:id/role`.
 
-Web (`apps/web`): `/register`, `/login`, `/forgot-password`, `/reset-password`, `/account`
-(server-validated, redirects to `/login?next=…`; `next` is restricted to same-site paths). The
+Web (`apps/web`): `/register`, `/login`, `/forgot-password`, `/reset-password`, `/verify-email`,
+`/account` (verification status + resend, change password, log out / log out everywhere;
+server-validated, redirects to `/login?next=…`; `next` is restricted to same-site paths). The
 header reflects session state; an API outage is shown as "unavailable", never as "logged out".
+
+### Authorization (M1.2, implemented)
+
+Authentication ("who are you?") and authorization ("may you?") are separate guards. The global
+guards run in this order (`app.guards.ts`, order pinned by `app.guards.spec.ts`):
+
+1. `CsrfGuard` — reject cross-site state-changing requests;
+2. `SessionAuthGuard` — authenticate; every route is private unless `@Public()`;
+3. `RolesGuard` — `@Roles(...)`; anonymous → **401**, wrong role → **403**;
+4. `VerifiedEmailGuard` — `@RequireVerifiedEmail()` → 403 with `code: "EMAIL_NOT_VERIFIED"`.
+
+Rules of the pattern:
+
+- **Decorators declare, guards enforce.** Controllers state `@AdminOnly()` /
+  `@Roles('ASSISTANT') @RequireVerifiedEmail()`; no controller parses roles itself.
+- **Role and verification are read from the database on every request** (the session lookup
+  loads the user), so a role change or suspension takes effect on the very next request.
+- **Fail closed:** `@Roles` on a `@Public()` route denies everyone (tested) — it is a bug, not an
+  open route. A route without `@Roles` is open to any _authenticated_ user.
+- **Resource-level authorization lives in services**, because it needs the loaded resource. The
+  pattern: scope the query to the caller and answer "not yours" exactly like "doesn't exist":
+  `updateMany({ where: { id, userId: caller.id } })` → count 0 → **404**. Worked example:
+  `AccountSecurityService.revokeSession` / `listSessions`. Bookings (Phase 2) must follow it
+  (customers: `customerId = caller`; assistants: assigned/offered jobs only; admins explicit).
+- Conditional updates (`WHERE role = <value read>`) make role changes safe under concurrency.
+
+**Role model.** One role per account: `CUSTOMER` (default and only value at registration),
+`ASSISTANT`, `BUSINESS_STAFF`, `ADMIN`. Clients can never send a role (strict schemas reject
+unknown fields; there is no profile-update endpoint). Roles change only by:
+`PATCH /admin/users/:id/role` — administrator only (verified), assignable values
+`CUSTOMER | ASSISTANT | BUSINESS_STAFF`, never `ADMIN`, never on yourself or another
+administrator, target must be verified for non-customer roles, audited with before/after; and
+the administrator CLI for creating administrators. (Assistant onboarding/verification in M1.4 and
+business onboarding in Phase 5 will drive this same service rather than add new paths.)
+
+**Administrator bootstrap (`pnpm --filter @qyou/api admin:create`).** The only way an `ADMIN` comes
+into existence; there is no HTTP path (tested: no route, registration/role schemas reject it).
+The operator never supplies or sees a password: the account is created with a random password
+nobody knows, email pre-verified, and a single-use 24 h set-password link is emailed to the
+administrator. Dry-run by default (`--yes` to act). Fail-closed: refuses if any administrator
+exists (`--additional` to add another), refuses if the email belongs to _any_ account (never
+promotes/edits users), serialises concurrent runs with an advisory lock, audits `admin.bootstrap`.
+It runs with the API's own configuration, so it connects as the runtime role. Procedure and
+recovery: RUNBOOK.
+
+### Email verification (M1.2, implemented)
+
+Tokens: 256-bit, single-use, 24 h, SHA-256 stored, bound to the address they were sent to; the
+newest link wins. Registration sends one; `POST /auth/email-verification/request` (authenticated,
+3/h/user) re-sends; `POST …/confirm` is public (the link is often opened elsewhere) with the token
+in the **URL fragment** auto-POSTed by `/verify-email`. Confirm is idempotent (a replayed link on a
+verified account → `already_verified`) and concurrency-safe (atomic claim; exactly one `verified`,
+the rest `already_verified`). Unknown/expired/malformed/superseded tokens all return the same 400.
+Completing a password reset also verifies the address (the mail proves mailbox control).
+
+**Email verification policy — what requires a verified email**
+
+| Requires verified email                                                                                                                                          | Does not                                             |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| Any administrator action (`@AdminOnly`)                                                                                                                          | Register, log in/out, view `/account`                |
+| Being assigned ASSISTANT / BUSINESS_STAFF (target must be verified)                                                                                              | Change password, log out everywhere, manage sessions |
+| _Policy for upcoming features:_ creating bookings/payments, submitting assistant or business onboarding, messaging another user, publishing reviews/wait reports | Browsing, search, viewing public listings            |
+
+Principle: anything that creates a commitment, moves money, or contacts another person requires
+`@RequireVerifiedEmail()`; reading public content and managing your own account does not. If an
+email-change feature is ever added it must clear `emailVerifiedAt` and issue a new token.
+
+### Account security (M1.2, implemented)
+
+- **Change password** (`POST /auth/password/change`): requires the current password (wrong guesses
+  are limited to 5/15 min per user, so a stolen session cannot brute-force it), new password must
+  differ and meet policy. **Session policy: every session of the user — including the current one —
+  is revoked and the calling device receives a fresh session (token rotation).** The device stays
+  logged in; all others, and any copy of the old token, are logged out immediately. The write is
+  conditional on the password hash that was verified, so concurrent changes/resets cannot silently
+  overwrite each other (409).
+- **Log out everywhere** (`POST /auth/logout-all`): revokes every session including this one and
+  clears the cookie. Enforced on the next request by the session lookup.
+- Password reset (M1.1) is unchanged: revokes all sessions and does not auto-login.
+
+### Audit-log integrity (M1.2, implemented)
+
+**Threat model.** In scope: a bug or compromise _of the API process_ (SQL injection, malicious
+dependency, mistaken code path) trying to hide or rewrite security events. Out of scope for
+in-database controls: a malicious/compromised **database owner, superuser or infrastructure
+administrator**, who can drop triggers, set `session_replication_role = replica`, edit WAL or
+restore backups. Those need controls outside the database (see "Limits").
+
+**Layer 1 — least privilege.** The API connects as `qyou_runtime`, a member of group role
+`qyou_app`; it is neither owner nor superuser. Migrations (`20261023214900_audit_log_immutability`)
+grant `qyou_app` normal DML on tables but **only `INSERT, SELECT` on `audit_logs`** (no UPDATE,
+DELETE, TRUNCATE) and nothing on `_prisma_migrations`. Being a non-owner it also cannot ALTER/DROP
+the table, disable or drop triggers, `GRANT` itself privileges (a non-owner GRANT is a no-op), or
+`SET ROLE`. Default privileges give future tables normal DML; append-only tables must opt out in
+their own migration.
+
+**Layer 2 — triggers.** `BEFORE UPDATE OR DELETE` (row) and `BEFORE TRUNCATE` (statement) triggers
+raise `insufficient_privilege` for **every** role, including the table owner, so a careless
+migration or ad-hoc owner session cannot silently edit history.
+
+**No foreign key.** `audit_logs.actorUserId` is a plain column: deleting a user can neither cascade
+into nor "SET NULL" audit rows (which would be an UPDATE the triggers would — correctly — block).
+
+**Atomicity.** Audit rows for state changes are written in the same transaction (`record(event, tx)`),
+so history commits or rolls back with the change it describes.
+
+**Limits / residual risk (documented, accepted for now).** (1) Owner/superuser can disable the
+triggers — keep the owner credential out of the deployed API (only CI/migration tooling should hold
+`MIGRATION_DATABASE_URL`; locally it shares `.env` for convenience), and use a non-superuser owner in production. (2) Rows can still be
+_added_ by anything holding INSERT — including a compromised API — so audit rows are evidence of
+what the API recorded, not proof against a compromised API. (3) No tamper-evidence (hash chain) or
+off-box copy yet. **Phase 6:** ship audit events to external append-only/WORM storage, add a hash
+chain or periodic signed checkpoints, and alert on trigger/privilege changes.
+
+### Database roles and connections
+
+| Role                                         | Used by                                                                                       | Privileges                                        |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| `qyou` (owner; superuser **locally only**)   | Prisma CLI / migrations / CI test setup (`MIGRATION_DATABASE_URL`, `TEST_ADMIN_DATABASE_URL`) | owns schema objects                               |
+| `qyou_app` (NOLOGIN group)                   | holds the runtime grants                                                                      | DML on tables except `audit_logs` (insert/select) |
+| `qyou_runtime` (LOGIN, member of `qyou_app`) | the running API and its e2e tests (`DATABASE_URL`)                                            | via `qyou_app` only                               |
+
+`prisma.config.ts` uses `MIGRATION_DATABASE_URL ?? DATABASE_URL`. Production: create both roles
+with a real secret (template in RUNBOOK), run migrations with a non-superuser owner.
+
+### Web Content Security Policy (M1.2, implemented)
+
+`apps/web/src/proxy.ts` (Next 16 "proxy", formerly middleware) generates a fresh nonce per request
+and sets `Content-Security-Policy` (+ HSTS when `FORCE_HTTPS=true`). Production policy:
+`default-src 'self'`; `script-src 'self' 'nonce-…' 'strict-dynamic'` (**no** `unsafe-inline`,
+**no** `unsafe-eval`); `style-src 'self' 'nonce-…'`; `connect-src 'self'` (the API is proxied under
+`/api/v1`, so a hijacked script cannot exfiltrate cross-origin); `frame-ancestors 'none'`,
+`object-src 'none'`, `base-uri 'self'`, `form-action 'self'`. All pages are dynamic (they read the
+session cookie), which nonces require. **Development only:** `unsafe-eval` for scripts (React dev
+tooling) and `style-src 'unsafe-inline'` (Next's dev tooling injects un-nonced `<style>` elements);
+scripts stay nonce-only even in dev. Verified by: unit tests of `buildCsp`; a black-box script
+(`pnpm verify:headers`, also a CI step) checking every public page of a _running production build_
+for CSP, nonce on every `<script>`, no inline `style=`/handlers, per-request nonce uniqueness and
+the token pages' `Referrer-Policy: no-referrer`; and a manual browser run (hydration + full flows,
+console clean). Not covered: Trusted Types, CSP reporting endpoint.
 
 ## Planned backend modules (design intent)
 
@@ -123,10 +272,10 @@ idempotency keys.
 
 - Authentication: database-backed sessions for customers/assistants/staff (D-011, implemented).
 - Authorization: role checks **and** resource ownership checks, enforced in guards/services on
-  the server. Customers see only their bookings; assistants only jobs offered/assigned to them;
+  the server (implemented for roles, verified email, and sessions; see Authorization). Customers see only their bookings; assistants only jobs offered/assigned to them;
   admin permissions are explicit and audited.
-- Audit log for security- and money-relevant actions (`audit_logs`, implemented for auth). It is
-  append-only by convention; DB-level immutability (trigger/revoked UPDATE/DELETE) is not yet enforced.
+- Audit log for security- and money-relevant actions (`audit_logs`, implemented for auth/admin),
+  append-only at the database level (see Audit-log integrity).
 - Validation at every API boundary with zod (D-009). Implemented for env and all auth inputs
   (strict objects: unknown fields such as `role` are rejected).
 - Payments: provider behind an interface; secrets via environment/secret manager; webhooks
@@ -154,7 +303,11 @@ history) as part of the rebuild.
 ## Testing strategy
 
 - Unit: pure logic (config, tokens, password hashing, rate limiter, schemas, filters) with Vitest, no I/O.
-- Integration/e2e (API): real PostgreSQL (`qyou_test`), real Nest app via `configureApp`.
+- Integration/e2e (API): real PostgreSQL (`qyou_test`), real Nest app via `configureApp`, connected
+  as the **least-privilege runtime role** (so permission behaviour is real); setup/truncation uses
+  the owner role. A test-only `ProbeController` exposes every decorator combination without adding
+  fake endpoints to the product. Concurrency is tested with real parallel requests and, for the
+  rate limiter, independent connection pools standing in for multiple API instances.
 - Web: unit tests for logic and jsdom component tests (React Testing Library, StrictMode);
   Playwright browser e2e from M1.7.
 - Gate: `pnpm check` locally and the same steps in `.github/workflows/ci.yml`.

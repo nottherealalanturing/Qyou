@@ -23,7 +23,7 @@ describe('Auth: registration, login, sessions, CSRF (e2e, real PostgreSQL)', () 
   afterAll(() => ctx.close());
   beforeEach(async () => {
     await resetDatabase(ctx.prisma);
-    ctx.limiter.reset();
+    await ctx.limiter.reset();
   });
 
   describe('registration', () => {
@@ -199,7 +199,7 @@ describe('Auth: registration, login, sessions, CSRF (e2e, real PostgreSQL)', () 
       expect(blocked.body.message).toMatch(/too many/i);
       expect(await ctx.prisma.auditLog.count({ where: { action: 'auth.login.blocked' } })).toBe(1);
 
-      ctx.limiter.reset(); // time passing
+      await ctx.limiter.reset(); // time passing
       await api.login(email, STRONG_PASSWORD).expect(200);
     });
 

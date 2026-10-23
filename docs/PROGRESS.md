@@ -1,116 +1,154 @@
 # Qyou — Progress
 
-_Last updated: 2026-10-23 (end of M1.1 session)._ The code is authoritative; if this file looks
+_Last updated: 2026-10-23 (end of M1.2 session)._ The code is authoritative; if this file looks
 stale, verify against the repository and reconcile.
 
 ## Current state
 
-**Phase 0 complete. Phase 1 milestone M1.1 (customer authentication) complete.**
-Nothing is committed (commits/pushes need explicit user authorisation); all work is in the
-working tree. Six obsolete workflow files are deleted and staged (`git rm`); everything else is
-untracked or modified.
+**Phase 0, M1.1 and M1.2 complete.** Commit `5f4699d` holds Phase 0 + M1.1. **All M1.2 work is
+uncommitted in the working tree** (commits/pushes need explicit user authorisation). One tracked
+file was deliberately deleted: `apps/api/src/common/rate-limit/rate-limiter.spec.ts` (the
+in-memory limiter it tested was replaced; the PostgreSQL limiter has `test/rate-limiter.e2e-spec.ts`).
 
-## Completed
+## Completed in M1.2 — authorization and account security
 
-### Phase 0 (see ROADMAP.md) — monorepo, NestJS API, Next.js web, Prisma/PostgreSQL, CI, docs.
+- **Authorization:** global guards in a fixed, tested order (CSRF → session → `@Roles` →
+  `@RequireVerifiedEmail`); fail-closed on `@Public`+`@Roles`; roles/verification read from the DB
+  per request; resource-ownership pattern (query-scoped, 404 for "not yours") with sessions as the
+  worked example; test-only `ProbeController` for decorator combinations.
+- **Role model / admin:** `CUSTOMER` is the only self-service role; `PATCH /admin/users/:id/role`
+  (admin + verified; never ADMIN, never self/another admin; verified target for privileged roles;
+  audited); **CLI-only administrator bootstrap** (`admin:create`) that never handles a password
+  (emails a 24 h set-password link), dry-run by default, fail-closed, never promotes accounts.
+- **Email verification:** single-use 24 h hash-only tokens bound to the address; sent on
+  registration; authenticated resend (3/h/user); public idempotent concurrency-safe confirm;
+  reset completion also verifies; policy documented in ARCHITECTURE.md.
+- **Password/session management:** change password (current password required, 5 wrong/15 min
+  limit, optimistic concurrency, **rotates the current session, revokes all others**), log out
+  everywhere, session list + revoke-own API.
+- **Audit-log integrity:** least-privilege runtime role (`qyou_runtime` ∈ `qyou_app`:
+  INSERT/SELECT only on `audit_logs`) + triggers blocking UPDATE/DELETE/TRUNCATE for every role
+  including the owner; no FK from `audit_logs` to users; threat model and limits documented.
+- **Rate limiter:** replaced the in-memory limiter with a PostgreSQL-backed one (shared across
+  instances, restart-proof, hashed keys).
+- **Web:** `/verify-email`, account page sections (verification status/resend, change password,
+  log out / log out of all devices), nonce-based **Content Security Policy** via `proxy.ts`,
+  `pnpm verify:headers`.
+- **Migrations:** `20261023214807_account_security` (emailVerifiedAt, `email_verification_tokens`,
+  `rate_limit_counters`, drop audit FK) and `20261023214900_audit_log_immutability` (grants,
+  triggers; hand-written).
+- **Infra/docs:** `docker/dev-db-roles.sql`, `pnpm db:roles`, `MIGRATION_DATABASE_URL` /
+  `TEST_ADMIN_DATABASE_URL`, CI updated; ARCHITECTURE, DECISIONS (D-017/D-020/D-021/D-022 revised,
+  D-024…D-032 added), ROADMAP (deferrals table), RUNBOOK (roles, bootstrap, troubleshooting).
 
-### M1.1 — Customer authentication
+## Latest checks (2026-10-23, clean state: node_modules/generated client/dist/.next deleted, `pnpm install --frozen-lockfile`, `pnpm db:roles`, `pnpm db:deploy:test`, then `pnpm check`)
 
-- **Schema (migration `20261023190714_auth_foundation`)**: `users` gains `name`, `passwordHash`,
-  `status` (`UserStatus`: ACTIVE/SUSPENDED); new tables `sessions`, `password_reset_tokens`,
-  `audit_logs` (token columns are SHA-256 hashes, `CHAR(64)`, unique). The two new `NOT NULL`
-  user columns have no default, which is only valid because `users` was empty everywhere
-  (Phase 0 was never deployed). Do not reuse that pattern on a populated table.
-- **API** (`/api/v1/auth`): `register`, `login`, `logout`, `me`, `password-reset/request`,
-  `password-reset/confirm`. Argon2id, DB-backed opaque sessions, rotation, expiry (30 d absolute,
-  7 d idle), revocation, CSRF Origin check, rate limits, audit log, global default-deny auth guard
-  (`@Public()` opt-out), global zod validation, 16 KiB body limit, generic error filter.
-  Full design: ARCHITECTURE.md → "Authentication".
-- **Mail**: `MailService` + SMTP/nodemailer; Mailpit added to `docker-compose.yml`
-  (SMTP `localhost:1052`, UI `http://localhost:8052`); `pnpm db:up` starts it.
-- **Web**: `/register`, `/login`, `/forgot-password`, `/reset-password`, `/account` (protected),
-  session-aware header, shared `Button`/`TextField`/`Alert`/`PasswordField` primitives with
-  accessible validation (aria-invalid/describedby, focus on first error, live alerts), loading
-  and success/error states, mobile-responsive; Next proxies `/api/v1/*` to the API (D-018).
-- **Docs**: ARCHITECTURE, DECISIONS (D-011 accepted; D-015…D-023 added; D-012 deferred by owner),
-  ROADMAP, RUNBOOK, this file.
+| Check                                                           | Result                      |
+| --------------------------------------------------------------- | --------------------------- |
+| `pnpm check` (format, lint, typecheck, test, test:e2e, build)   | **exit 0**                  |
+| API unit tests (Vitest)                                         | 33 passed (7 files)         |
+| API e2e on real PostgreSQL `qyou_test`, as the **runtime role** | 176 passed (11 files)       |
+| Web unit + jsdom component tests                                | 53 passed (9 files)         |
+| `pnpm lint` (`--deny-warnings`)                                 | clean                       |
+| Web production build (includes `Proxy` for CSP)                 | compiled; all pages dynamic |
 
-## Latest checks (2026-10-23, from a clean state: node_modules/generated client/dist/.next deleted, `pnpm install --frozen-lockfile`)
+e2e coverage added in M1.2: anonymous access to every protected route; role matrix
+(customer/assistant/business/admin) on probe routes; stale-privilege check; verified-email policy;
+escalation attempts (registration role, role fields on other endpoints, nonexistent profile-update
+routes, customer/assistant/business → admin API, self-promotion, no HTTP route to ADMIN);
+admin role assignment rules + concurrency; session ownership (404 for others); email-verification
+lifecycle (invalid/expired/reused/superseded/changed-address/concurrent ×8, resend limits, mail
+failure, never in logs); change password (rotation, revocation of all other sessions, wrong
+current, lockout, concurrent ×5, CSRF); log out everywhere; admin bootstrap (unusable password,
+invite flow, repeat/additional/existing-email refusals, invalid input, concurrent ×6, mail
+failure, no HTTP path); **audit immutability against the real DB** (runtime role: UPDATE/DELETE/
+TRUNCATE denied via SQL and ORM, cannot ALTER/DROP/disable triggers/SET ROLE, GRANT is a no-op;
+owner: triggers reject UPDATE/DELETE/TRUNCATE; user deletion leaves audit rows; no FK);
+rate limiter (atomic under concurrency, **one shared limit across three independent connection
+pools**, survives restart, hashed keys, window rollover). All M1.1 regression suites still pass.
 
-| Check                                                                    | Result              |
-| ------------------------------------------------------------------------ | ------------------- |
-| `pnpm check` (format, lint, typecheck, test, test:e2e, build)            | **exit 0**          |
-| API unit tests (Vitest)                                                  | 38 passed (7 files) |
-| API e2e on real PostgreSQL `qyou_test` (supertest against live listener) | 75 passed (5 files) |
-| Web unit + jsdom component tests                                         | 33 passed (5 files) |
-| `pnpm lint` (`--deny-warnings`)                                          | clean               |
+Runtime verification beyond the suites (all actually performed):
 
-Runtime verification beyond the test suites:
+- **Fresh cluster:** all 4 migrations applied to a brand-new throwaway Postgres container with no
+  roles (group role created by the migration; re-run idempotent); also applied to the dev DB (via
+  `migrate dev`, which replays them in a shadow DB) and a recreated `qyou_test`.
+- **Admin CLI against the dev DB + Mailpit:** usage (exit 64), dry run (2), invalid input (1),
+  create (0, email delivered), repeat (1, refused), different email (1, refused), existing
+  customer with `--additional` (1, refused, not promoted). Then over HTTP: guess-login 401 →
+  set password via the emailed link → admin login → assigned ASSISTANT to a verified user →
+  granting ADMIN rejected (400) → anonymous 401. In the dev DB the runtime role got
+  `permission denied` on UPDATE/DELETE of `audit_logs` and the owner got the trigger's
+  `append-only` error.
+- **Browser, production build (`next start`) + API + Mailpit:** CSP present, every `<script>`
+  nonce'd, React hydrated, console clean; register → unverified banner → emailed link →
+  `/verify-email` verified (fragment stripped) → account shows verified; wrong current password
+  shows the server's field error; change password succeeds, a second device session got 401
+  while this browser stayed signed in; "Log out of all devices" → `/login`, DB showed 0 active
+  sessions, audit rows for each step.
+- **Browser, dev server (`next dev`):** no new console violations after the dev-only style relaxation
+  (see D-030); hydration works.
+- `pnpm verify:headers` passed against the production build (6 pages) and **fails** against a
+  server without the policy (negative check).
 
-- **Browser (Next dev server + API + Mailpit), desktop and 375 px mobile**: empty-form validation
-  (focus moves to first invalid field) → register → lands on protected `/account` →
-  `document.cookie` empty (HttpOnly) → log out → `/account` redirects to
-  `/login?next=/account` → forgot-password → loading + success states → email appeared in Mailpit
-  → link opened (token stripped from the address bar) → new password set → old password rejected
-  with the generic error → new password logs in. Audit rows for each step confirmed in
-  PostgreSQL; consumed token reuse → 400; foreign-Origin login → 403; no-cookie `/me` → 401.
-- **Production-mode API build**: fails fast without `SMTP_HOST`; issues
-  `__Host-qyou_session; Path=/; HttpOnly; Secure; SameSite=Lax` (no `Domain`); rejects `http://`
-  Origin. Next proxy forwards `Set-Cookie`, `Origin` and the real client IP (audit row showed the
-  client IP, not the proxy's).
-- Server logs grepped after the browser session: no passwords, tokens or hashes.
-- Web UI flows were exercised on the **dev** server; the production web build compiles and
-  prerenders correctly (all auth routes dynamic) but was not driven in a browser.
+### Defects found and fixed during this milestone
 
-### Defects found and fixed during this milestone (all by the new tests/runtime checks)
+1. `GRANT` by a non-owner is a no-op (PostgreSQL only warns), not an error → test now asserts the
+   privileges are unchanged instead of expecting an exception.
+2. Migration used `REVOKE … _prisma_migrations` unconditionally, which fails in Prisma's shadow
+   database (table absent there) → guarded.
+3. `pg_advisory_xact_lock` returns `void`, which `$queryRaw` cannot deserialize → `$executeRaw`.
+4. The Next dev tooling injects un-nonced `<style>` elements (empty-string-hash CSP violations) →
+   dev-only `style-src 'unsafe-inline'`; production stays nonce-only and is verified separately.
+5. Existing tests assumed registration sends no mail / `/me` has no `emailVerified` → updated
+   deliberately, not loosened.
 
-1. Oversized body returned 500 (body-parser error masked by the exception filter) → now 413.
-2. Lockout 429 lacked `Retry-After` (thrown from the service, bypassing the guard) → filter sets it.
-3. Developer's `.env` (`TRUST_PROXY=1`) leaked into e2e → e2e config now pins its environment.
-4. Reset page showed "invalid link" in development: React StrictMode double-ran the effect and
-   the second run found the fragment already stripped → token captured once in a ref; jsdom
-   regression test added (verified to fail with the bug reintroduced).
+## Known issues / limitations (remaining risks)
 
-## Known issues / limitations
-
-- **Email is not verified** (D-022); accounts work immediately. Needed before payments/assistants.
-- **Rate limiter is in-memory, per process** (D-017); not safe for multi-instance deployment.
-  `TRUST_PROXY` must match the real proxy count.
-- **Mail is fire-and-forget** (D-020): a transient SMTP failure loses that email (logged by error
-  name only); no outbox/retry yet.
-- **Registration reveals duplicate emails** with 409 (D-021).
-- `audit_logs` is append-only by convention only; no DB-level immutability/retention policy.
-- No change-password-while-logged-in, no "log out everywhere"/session list UI, no 2FA, no
-  Argon2 rehash-on-login, no account lockout notification emails.
-- Web has security headers (nosniff, frame deny, referrer policy, permissions policy) but **no CSP**
-  yet (Next requires nonce plumbing); OpenAPI documents request bodies but not response schemas.
-- `localhost`-only verification: TLS, real SMTP provider and `__Host-` cookie behaviour in a real
-  browser over HTTPS were not exercised (only the headers were inspected).
-- The GitHub Actions workflow has **never run** (YAML reviewed only). No Playwright browser e2e.
-  Coverage is not measured/enforced.
-- Mailpit uses the `latest` image tag (dev only).
-- npm is unusable on this machine for this tree (D-002); use pnpm.
+- **CI has never been run.** The workflow was updated and its YAML parses, and every step was run
+  locally, but a real GitHub Actions run has not happened (D-032).
+- **No browser automation suite** (D-031): browser flows were verified manually; planned M1.7.
+- **Mail is fire-and-forget** (D-020): a transient SMTP failure loses that email; resend exists for
+  verification and reset; the outbox is deferred because it would store raw tokens.
+- **Registration reveals duplicate emails (409)** (D-021): re-reviewed, deferred with rationale.
+- **Audit integrity limits:** a database owner/superuser can still disable the triggers; a
+  compromised API can still INSERT false rows; no hash chain/off-box shipping yet (Phase 6).
+- **Local owner role is a superuser** (Docker image default); production must use a non-superuser
+  owner and keep its URL out of the API (D-029).
+- **Rate limiter** uses fixed windows (up to 2× burst at a boundary) and adds a DB round-trip per
+  limited request; fails closed if the DB is down (D-017).
+- **CSP:** dev uses `unsafe-eval` + `style-src 'unsafe-inline'`; no reporting endpoint, no Trusted
+  Types; every page must stay dynamic for nonces; `FORCE_HTTPS` must be set when served over HTTPS.
+- Roles: one role per account (D-025); no suspension endpoint yet (status can only be set in the
+  DB; suspended users are rejected on every request); no UI for the sessions list (API exists).
+- An administrator who loses their mailbox needs a database operator (by design).
+- No 2FA, no login-alert emails, no Argon2 rehash-on-login, no email-change feature.
+- OpenAPI documents request bodies but not response schemas.
+- npm is unusable on this machine for this tree (D-002); use pnpm. Mailpit uses the `latest` tag.
 
 ## Next action (exact)
 
-**M1.2 — Authorization foundation** (see ROADMAP.md), small vertical slice:
+**M1.3 — Service categories, eligible tasks and service locations** (see ROADMAP.md), as a small
+vertical slice:
 
-1. `Roles(...)` decorator + `RolesGuard` (global, after `SessionAuthGuard`); tests that a
-   CUSTOMER gets 403 on an ADMIN-only route and unauthenticated gets 401.
-2. Resource-ownership pattern (service-level `assertOwner`/scoped queries) documented in
-   ARCHITECTURE.md with a worked example ready for bookings; no self-service role changes.
-3. Admin bootstrap that never exposes an HTTP path to become ADMIN (e.g. a CLI/script
-   `pnpm --filter @qyou/api admin:create`), audited.
-4. Email verification flow (D-022): token table, send on register, `emailVerifiedAt`, endpoint to
-   resend (rate-limited, enumeration-safe), and a UI banner on `/account`.
-5. Change password while logged in (re-auth with current password, revoke other sessions) and
-   "log out everywhere", with UI on `/account`.
-6. Make `audit_logs` immutable at the DB level (revoke UPDATE/DELETE via trigger) + e2e test.
-7. Run the full `pnpm check`, update docs.
+1. Decide the minimal real reference data (owner input welcome: initial categories and which
+   Nigerian cities/venue types to seed first; do **not** invent fake businesses or live queue data).
+2. Schema + migration (grants follow the new default-privilege rules): `ServiceCategory`,
+   `EligibleTask` (with explicit venue-specific restrictions per category/location — the
+   "prohibited/delegable" rules from PRODUCT.md), `ServiceLocation` (name, type, city, coordinates,
+   source/verification status).
+3. Public read API (`@Public`, cached, paginated) for categories/tasks/locations with search by
+   city/type; admin-only write endpoints using `@AdminOnly()` and audited.
+4. Seed script that loads clearly-labelled real reference data only.
+5. e2e tests on the real DB (public reads, admin-only writes, validation, restrictions), web pages
+   deferred to M1.6 unless trivially needed.
+6. Run the full `pnpm check`, update docs.
 
-Then M1.3 (service categories, eligible tasks, locations).
+Then M1.4 (assistant profile, onboarding, verification) which will call the M1.2 role-assignment
+service on approval.
 
 ## Decisions awaiting the owner (do not decide silently)
 
-- **D-012 (deferred by owner 2026-10-23)**: payment provider, commission %, fees, cancellation and
+- **D-012 (deferred by owner 2026-10-23):** payment provider, commission %, fees, cancellation and
   refund policy, payout automation — required before any real payment implementation (Phase 2).
+- Whether to prioritise enumeration-safe registration (D-021) before launch, or accept the
+  rate-limited 409 for the first release.

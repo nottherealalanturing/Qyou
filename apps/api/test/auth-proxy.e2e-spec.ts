@@ -23,7 +23,7 @@ describe('Auth: behind a trusted reverse proxy (TRUST_PROXY=1)', () => {
   afterAll(() => ctx.close());
   beforeEach(async () => {
     await resetDatabase(ctx.prisma);
-    ctx.limiter.reset();
+    await ctx.limiter.reset();
   });
 
   it('limits per forwarded client IP, so one client cannot lock out others', async () => {

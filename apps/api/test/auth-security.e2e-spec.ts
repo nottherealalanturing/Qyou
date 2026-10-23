@@ -39,7 +39,7 @@ describe('Auth: secrets never leak (e2e, real PostgreSQL)', () => {
   afterAll(() => ctx.close());
   beforeEach(async () => {
     await resetDatabase(ctx.prisma);
-    ctx.limiter.reset();
+    await ctx.limiter.reset();
     ctx.mail.sent.length = 0;
   });
 
@@ -53,8 +53,14 @@ describe('Auth: secrets never leak (e2e, real PostgreSQL)', () => {
       await api.login(email, 'wrong-password-LOGSECRET').expect(401);
       await api.login(email, STRONG_PASSWORD, { token: session }).expect(200);
       await api.post('/auth/password-reset/request', { email }).expect(202);
-      await vi.waitFor(() => expect(ctx.mail.sent).toHaveLength(1));
-      const resetToken = /#token=([\w-]{43})/.exec(ctx.mail.sent[0]!.text)![1]!;
+      await vi.waitFor(() =>
+        expect(ctx.mail.sent.some((m) => /reset/i.test(m.subject))).toBe(true),
+      );
+      const resetMail = ctx.mail.sent.find((m) => /reset/i.test(m.subject))!;
+      const resetToken = /#token=([\w-]{43})/.exec(resetMail.text)![1]!;
+      const verifyToken = /#token=([\w-]{43})/.exec(
+        ctx.mail.sent.find((m) => /verify/i.test(m.subject))!.text,
+      )![1]!;
       await api
         .post('/auth/password-reset/confirm', { token: resetToken, password: newPassword })
         .expect(200);
@@ -67,6 +73,7 @@ describe('Auth: secrets never leak (e2e, real PostgreSQL)', () => {
         newPassword,
         session,
         resetToken,
+        verifyToken,
         '$argon2id',
       ]) {
         expect(logs, `log output must not contain ${secret.slice(0, 6)}…`).not.toContain(secret);
@@ -102,6 +109,7 @@ describe('Auth: secrets never leak (e2e, real PostgreSQL)', () => {
       expect(Object.keys(body.user).toSorted()).toEqual([
         'createdAt',
         'email',
+        'emailVerified',
         'id',
         'name',
         'role',

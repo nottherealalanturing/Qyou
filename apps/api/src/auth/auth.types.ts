@@ -7,6 +7,7 @@ export interface PublicUser {
   email: string;
   name: string;
   role: UserRole;
+  emailVerified: boolean;
   createdAt: Date;
 }
 
@@ -27,3 +28,6 @@ export const SESSION_IDLE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** `lastSeenAt` is refreshed at most this often, to avoid a write on every request. */
 export const SESSION_TOUCH_INTERVAL_MS = 5 * 60 * 1000;
 export const PASSWORD_RESET_TTL_MS = 30 * 60 * 1000;
+export const EMAIL_VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000;
+/** Administrator invitations (set-your-password links) are valid longer than ordinary resets. */
+export const ADMIN_INVITE_TTL_MS = 24 * 60 * 60 * 1000;

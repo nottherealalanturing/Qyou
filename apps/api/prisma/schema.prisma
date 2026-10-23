@@ -3,9 +3,9 @@
 // virtual ticket) are deliberately separate models — see docs/ARCHITECTURE.md.
 
 generator client {
-  provider       = "prisma-client"
-  output         = "../src/generated/prisma"
-  moduleFormat   = "esm"
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "esm"
   importFileExtension = "js"
 }
 
@@ -26,20 +26,22 @@ enum UserStatus {
 }
 
 model User {
-  id           String     @id @default(uuid(7)) @db.Uuid
+  id              String     @id @default(uuid(7)) @db.Uuid
   /// Normalised (NFKC, trimmed, lower-cased) by the application before every write/lookup.
-  email        String     @unique
-  name         String     @db.VarChar(80)
+  email           String     @unique
+  name            String     @db.VarChar(80)
   /// Argon2id PHC string. Never returned by any API response, never logged.
-  passwordHash String
-  role         UserRole   @default(CUSTOMER)
-  status       UserStatus @default(ACTIVE)
-  createdAt    DateTime   @default(now()) @db.Timestamptz(3)
-  updatedAt    DateTime   @updatedAt @db.Timestamptz(3)
+  passwordHash    String
+  role            UserRole   @default(CUSTOMER)
+  status          UserStatus @default(ACTIVE)
+  /// Set when the user proves control of `email` (verification link or password reset).
+  emailVerifiedAt DateTime?  @db.Timestamptz(3)
+  createdAt       DateTime   @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime   @updatedAt @db.Timestamptz(3)
 
-  sessions            Session[]
-  passwordResetTokens PasswordResetToken[]
-  auditLogs           AuditLog[]
+  sessions                Session[]
+  passwordResetTokens     PasswordResetToken[]
+  emailVerificationTokens EmailVerificationToken[]
 
   @@map("users")
 }
@@ -84,6 +86,8 @@ model PasswordResetToken {
 /// Must never contain passwords, tokens, hashes or other secrets.
 model AuditLog {
   id          String   @id @default(uuid(7)) @db.Uuid
+  /// Deliberately NOT a foreign key: audit rows must survive (and never be modified by) user
+  /// deletion. See docs/ARCHITECTURE.md "Audit-log integrity".
   actorUserId String?  @db.Uuid
   action      String   @db.VarChar(80)
   targetType  String?  @db.VarChar(40)
@@ -93,9 +97,37 @@ model AuditLog {
   metadata    Json?
   createdAt   DateTime @default(now()) @db.Timestamptz(3)
 
-  actor User? @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
-
   @@index([actorUserId, createdAt])
   @@index([action, createdAt])
   @@map("audit_logs")
+}
+
+/// Single-use, expiring email-verification token (SHA-256 hash only). `email` pins the token to
+/// the address it was sent to, so it can never verify a different address after a change.
+model EmailVerificationToken {
+  id        String    @id @default(uuid(7)) @db.Uuid
+  userId    String    @db.Uuid
+  email     String
+  tokenHash String    @unique @db.Char(64)
+  expiresAt DateTime  @db.Timestamptz(3)
+  usedAt    DateTime? @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("email_verification_tokens")
+}
+
+/// Shared fixed-window counters behind the rate limiter, so limits hold across API instances.
+/// `key` is a SHA-256 of the logical key (no raw emails/IPs at rest).
+model RateLimitCounter {
+  key         String   @db.Char(64)
+  windowStart DateTime @db.Timestamptz(3)
+  count       Int
+
+  @@id([key, windowStart])
+  @@index([windowStart])
+  @@map("rate_limit_counters")
 }

@@ -1,76 +1,88 @@
+import { createHash } from 'node:crypto';
+import { Injectable } from '@nestjs/common';
+import { PrismaService } from '../../prisma/prisma.service.js';
+
 export interface RateLimitResult {
   allowed: boolean;
-  /** Seconds until the oldest counted hit expires (only meaningful when `allowed` is false). */
+  /** Seconds until the current window ends (only meaningful when `allowed` is false). */
   retryAfterSeconds: number;
 }
 
 /**
- * In-memory sliding-window limiter.
+ * Fixed-window rate limiter whose counters live in PostgreSQL (`rate_limit_counters`), so limits
+ * are shared by every API instance and survive restarts.
  *
- * Limitation (documented in ARCHITECTURE.md): state is per process. It is correct for a single
- * API instance; running several instances needs a shared store (Redis/PostgreSQL) — Phase 6.
- * Memory is bounded: expired windows are pruned lazily and the key count is capped.
+ * - `hit` is a single atomic `INSERT … ON CONFLICT DO UPDATE … WHERE count < limit`: concurrent
+ *   requests (on any instance) can never push the counter past the limit, and blocked attempts
+ *   are not counted.
+ * - Semantics are *fixed* windows: a client can burst up to 2× the limit across a window
+ *   boundary. Acceptable for these abuse limits; documented in DECISIONS.md (D-017).
+ * - Keys are hashed (SHA-256) before storage, so no raw emails or IPs sit in the table.
+ * - Cost: one extra query per limited request. The limiter fails closed: if the database is
+ *   unreachable the request errors (the API cannot do anything useful without it anyway).
  */
+@Injectable()
 export class RateLimiter {
-  private readonly hits = new Map<string, number[]>();
+  constructor(private readonly prisma: PrismaService) {}
 
-  constructor(
-    private readonly now: () => number = Date.now,
-    private readonly maxKeys = 50_000,
-  ) {}
-
-  /** Records a hit and reports whether it is within `limit` hits per `windowMs`. */
-  hit(key: string, limit: number, windowMs: number): RateLimitResult {
-    const now = this.now();
-    const recent = this.recent(key, windowMs, now);
-    if (recent.length >= limit) {
-      return { allowed: false, retryAfterSeconds: this.retryAfter(recent, windowMs, now) };
-    }
-    recent.push(now);
-    this.store(key, recent);
-    return { allowed: true, retryAfterSeconds: 0 };
+  async hit(key: string, limit: number, windowMs: number): Promise<RateLimitResult> {
+    const hashed = hashKey(key);
+    const windowStart = currentWindowStart(windowMs);
+    const rows = await this.prisma.$queryRaw<{ count: number }[]>`
+      INSERT INTO rate_limit_counters ("key", "windowStart", "count")
+      VALUES (${hashed}, ${windowStart}, 1)
+      ON CONFLICT ("key", "windowStart")
+      DO UPDATE SET "count" = rate_limit_counters."count" + 1
+        WHERE rate_limit_counters."count" < ${limit}
+      RETURNING "count"`;
+    if (rows.length > 0) return { allowed: true, retryAfterSeconds: 0 };
+    return { allowed: false, retryAfterSeconds: secondsUntilWindowEnd(windowStart, windowMs) };
   }
 
-  /** Number of hits currently inside the window (no recording). */
-  count(key: string, windowMs: number): number {
-    return this.recent(key, windowMs, this.now()).length;
+  /** Hits recorded in the current window (no recording). */
+  async count(key: string, windowMs: number): Promise<number> {
+    const row = await this.prisma.rateLimitCounter.findUnique({
+      where: {
+        key_windowStart: { key: hashKey(key), windowStart: currentWindowStart(windowMs) },
+      },
+      select: { count: true },
+    });
+    return row?.count ?? 0;
   }
 
-  /** Seconds until a key with `limit` hits would be allowed again; 0 when under the limit. */
-  retryAfterSeconds(key: string, limit: number, windowMs: number): number {
-    const now = this.now();
-    const recent = this.recent(key, windowMs, now);
-    return recent.length >= limit ? this.retryAfter(recent, windowMs, now) : 0;
+  /** Seconds until a key at `limit` hits is allowed again; 0 when under the limit. */
+  async retryAfterSeconds(key: string, limit: number, windowMs: number): Promise<number> {
+    const used = await this.count(key, windowMs);
+    return used >= limit ? secondsUntilWindowEnd(currentWindowStart(windowMs), windowMs) : 0;
   }
 
-  clear(key: string): void {
-    this.hits.delete(key);
+  /** Forgets every window of a key (e.g. after a successful login). */
+  async clear(key: string): Promise<void> {
+    await this.prisma.rateLimitCounter.deleteMany({ where: { key: hashKey(key) } });
   }
 
-  reset(): void {
-    this.hits.clear();
+  /** Test helper and operational escape hatch: forgets all counters. */
+  async reset(): Promise<void> {
+    await this.prisma.rateLimitCounter.deleteMany();
   }
 
-  private recent(key: string, windowMs: number, now: number): number[] {
-    const timestamps = this.hits.get(key);
-    if (!timestamps) return [];
-    const fresh = timestamps.filter((t) => now - t < windowMs);
-    if (fresh.length === 0) this.hits.delete(key);
-    else if (fresh.length !== timestamps.length) this.hits.set(key, fresh);
-    return fresh;
+  /** Housekeeping: windows are at most an hour long, so day-old rows are dead. */
+  async purgeExpired(): Promise<number> {
+    const { count } = await this.prisma.rateLimitCounter.deleteMany({
+      where: { windowStart: { lt: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
+    });
+    return count;
   }
+}
 
-  private store(key: string, timestamps: number[]): void {
-    if (!this.hits.has(key) && this.hits.size >= this.maxKeys) {
-      // Evict the oldest-inserted key (Map preserves insertion order).
-      const oldest = this.hits.keys().next().value;
-      if (oldest !== undefined) this.hits.delete(oldest);
-    }
-    this.hits.set(key, timestamps);
-  }
+function hashKey(key: string): string {
+  return createHash('sha256').update(key).digest('hex');
+}
 
-  private retryAfter(recent: number[], windowMs: number, now: number): number {
-    const oldest = Math.min(...recent);
-    return Math.max(1, Math.ceil((oldest + windowMs - now) / 1000));
-  }
+function currentWindowStart(windowMs: number): Date {
+  return new Date(Math.floor(Date.now() / windowMs) * windowMs);
+}
+
+function secondsUntilWindowEnd(windowStart: Date, windowMs: number): number {
+  return Math.max(1, Math.ceil((windowStart.getTime() + windowMs - Date.now()) / 1000));
 }

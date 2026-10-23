@@ -1,19 +1,16 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 import { postJson } from '@/lib/forms';
 import { validateNewPassword } from '@/lib/validation';
 import { Alert } from '../ui/alert';
 import { Button, buttonClasses } from '../ui/button';
 import { PasswordField } from './password-field';
 import { useFocusOnError } from './use-form-focus';
-
-type TokenState =
-  { status: 'reading' } | { status: 'missing' } | { status: 'ready'; token: string };
+import { useFragmentToken } from './use-fragment-token';
 
 export function ResetPasswordForm() {
-  const [tokenState, setTokenState] = useState<TokenState>({ status: 'reading' });
   const [passwordError, setPasswordError] = useState<string | undefined>();
   const [formError, setFormError] = useState<string | null>(null);
   const [linkInvalid, setLinkInvalid] = useState(false);
@@ -22,23 +19,7 @@ export function ResetPasswordForm() {
   const [attempt, setAttempt] = useState(0);
   const { formRef, alertRef } = useFocusOnError(attempt);
 
-  // The token arrives in the URL fragment (#token=…), which browsers never send to any server.
-  // Read it once, then strip it from the address bar and history entry. The ref makes this
-  // idempotent: React StrictMode runs effects twice in development, and the second run would
-  // otherwise find the fragment already removed and wrongly report a missing token.
-  const tokenRef = useRef<string | null | undefined>(undefined);
-  useEffect(() => {
-    if (tokenRef.current === undefined) {
-      const token = new URLSearchParams(window.location.hash.slice(1)).get('token');
-      tokenRef.current = token;
-      if (token) window.history.replaceState(null, '', window.location.pathname);
-    }
-    const token = tokenRef.current;
-    // Reading the URL fragment is synchronisation with an external system (the browser
-    // location) and it is unavailable during SSR, so state must be set after mount.
-    // oxlint-disable-next-line react/set-state-in-effect
-    setTokenState(token ? { status: 'ready', token } : { status: 'missing' });
-  }, []);
+  const tokenState = useFragmentToken();
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

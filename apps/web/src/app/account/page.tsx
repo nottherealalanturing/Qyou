@@ -1,7 +1,10 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
+import { ChangePasswordForm } from '@/components/auth/change-password-form';
 import { LogoutButton } from '@/components/auth/logout-button';
+import { LogoutEverywhere } from '@/components/auth/logout-everywhere';
+import { ResendVerification } from '@/components/auth/resend-verification';
 import { Alert } from '@/components/ui/alert';
 import { getSession } from '@/lib/session';
 
@@ -13,6 +16,8 @@ const ROLE_LABELS = {
   BUSINESS_STAFF: 'Business staff',
   ADMIN: 'Administrator',
 } as const;
+
+const card = 'rounded-card border border-line bg-surface p-6 shadow-card';
 
 export default async function AccountPage() {
   const session = await getSession();
@@ -41,10 +46,7 @@ export default async function AccountPage() {
       <h1 className="text-3xl font-bold tracking-tight">Hi, {user.name.split(' ')[0]}</h1>
       <p className="mt-2 text-ink-muted">You’re logged in on this device.</p>
 
-      <section
-        aria-labelledby="profile-heading"
-        className="mt-8 rounded-card border border-line bg-surface p-6 shadow-card"
-      >
+      <section aria-labelledby="profile-heading" className={`mt-8 ${card}`}>
         <div className="flex items-center gap-4">
           <div
             aria-hidden="true"
@@ -71,24 +73,53 @@ export default async function AccountPage() {
         </dl>
       </section>
 
-      <section
-        aria-labelledby="security-heading"
-        className="mt-6 rounded-card border border-line bg-surface p-6 shadow-card"
-      >
-        <h2 id="security-heading" className="text-lg font-semibold">
-          Security
+      <section aria-labelledby="verification-heading" className={`mt-6 ${card}`}>
+        <h2 id="verification-heading" className="text-lg font-semibold">
+          Email verification
         </h2>
-        <p className="mt-1 text-ink-muted">
-          Changing your password by email logs you out everywhere.{' '}
+        {user.emailVerified ? (
+          <p className="mt-1 flex items-center gap-2 font-medium text-success">
+            <span aria-hidden="true">✓</span> {user.email} is verified
+          </p>
+        ) : (
+          <div className="mt-2 space-y-4">
+            <Alert tone="info">
+              Verify your email address to book assistants and receive booking updates. We sent a
+              link to <strong className="break-all">{user.email}</strong>.
+            </Alert>
+            <ResendVerification email={user.email} />
+          </div>
+        )}
+      </section>
+
+      <section aria-labelledby="password-heading" className={`mt-6 ${card}`}>
+        <h2 id="password-heading" className="text-lg font-semibold">
+          Change password
+        </h2>
+        <div className="mt-4 max-w-md">
+          <ChangePasswordForm />
+        </div>
+        <p className="mt-4 text-sm text-ink-muted">
+          Forgot your current password?{' '}
           <Link
             href="/forgot-password"
             className="font-semibold text-brand-700 underline underline-offset-2"
           >
-            Reset password
+            Reset it by email
           </Link>
         </p>
-        <div className="mt-5 flex items-center gap-3">
+      </section>
+
+      <section aria-labelledby="sessions-heading" className={`mt-6 ${card}`}>
+        <h2 id="sessions-heading" className="text-lg font-semibold">
+          Sessions
+        </h2>
+        <p className="mt-1 text-ink-muted">
+          Log out here, or sign out of every device if you suspect someone else has access.
+        </p>
+        <div className="mt-5 flex flex-wrap items-start gap-3">
           <LogoutButton />
+          <LogoutEverywhere />
         </div>
       </section>
     </main>

@@ -22,9 +22,9 @@ const nextConfig: NextConfig = {
   async headers() {
     return [
       { source: '/:path*', headers: securityHeaders },
-      // Defence in depth for the page that handles a reset token.
+      // Pages that receive a token in the URL fragment: never leak anything via Referer, never cache.
       {
-        source: '/reset-password',
+        source: '/:page(reset-password|verify-email)',
         headers: [
           { key: 'Referrer-Policy', value: 'no-referrer' },
           { key: 'Cache-Control', value: 'no-store' },

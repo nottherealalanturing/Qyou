@@ -10,11 +10,12 @@ import { AuditService } from '../audit/audit.service.js';
 import { tooManyRequests } from '../common/rate-limit/rate-limit.guard.js';
 import { RateLimiter } from '../common/rate-limit/rate-limiter.js';
 import type { Env } from '../config/env.js';
-import type { User } from '../generated/prisma/client.js';
+import type { Prisma, User } from '../generated/prisma/client.js';
 import { MailService } from '../mail/mail.service.js';
 import { passwordResetEmail } from '../mail/templates.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { PASSWORD_RESET_TTL_MS, type PublicUser, type RequestContext } from './auth.types.js';
+import { EmailVerificationService } from './email-verification.service.js';
 import { PasswordService } from './password.service.js';
 import { SessionService } from './session.service.js';
 import { generateToken, hashToken } from './tokens.js';
@@ -40,13 +41,14 @@ function isUniqueViolation(error: unknown): boolean {
 }
 
 function toPublicUser(
-  user: Pick<User, 'id' | 'email' | 'name' | 'role' | 'createdAt'>,
+  user: Pick<User, 'id' | 'email' | 'name' | 'role' | 'createdAt' | 'emailVerifiedAt'>,
 ): PublicUser {
   return {
     id: user.id,
     email: user.email,
     name: user.name,
     role: user.role,
+    emailVerified: user.emailVerifiedAt !== null,
     createdAt: user.createdAt,
   };
 }
@@ -62,6 +64,7 @@ export class AuthService {
     private readonly audit: AuditService,
     private readonly mail: MailService,
     private readonly limiter: RateLimiter,
+    private readonly verification: EmailVerificationService,
     private readonly config: ConfigService<Env, true>,
   ) {}
 
@@ -73,11 +76,12 @@ export class AuthService {
     const passwordHash = await this.passwords.hash(input.password);
 
     try {
-      return await this.prisma.$transaction(async (tx) => {
+      const created = await this.prisma.$transaction(async (tx) => {
         const user = await tx.user.create({
           data: { email: input.email, name: input.name, passwordHash },
         });
         const session = await this.sessions.create(user.id, ctx.userAgent, tx);
+        const emailToken = await this.verification.createToken(tx, user);
         await this.audit.record(
           {
             action: 'auth.register',
@@ -89,8 +93,19 @@ export class AuthService {
           },
           tx,
         );
-        return { user: toPublicUser(user), token: session.token, expiresAt: session.expiresAt };
+        return {
+          user,
+          verificationToken: emailToken,
+          grant: {
+            user: toPublicUser(user),
+            token: session.token,
+            expiresAt: session.expiresAt,
+          },
+        };
       });
+      // After commit, so a rolled-back registration never sends mail.
+      this.verification.sendEmail(created.user, created.verificationToken);
+      return created.grant;
     } catch (error) {
       // The unique index is the source of truth, so concurrent duplicate registrations are safe.
       if (isUniqueViolation(error)) {
@@ -109,8 +124,12 @@ export class AuthService {
     const accountKey = `login-fail-account:${input.email}`;
 
     const blockedFor = Math.max(
-      this.limiter.retryAfterSeconds(pairKey, MAX_FAILURES_PER_EMAIL_AND_IP, FAILURE_WINDOW_MS),
-      this.limiter.retryAfterSeconds(accountKey, MAX_FAILURES_PER_EMAIL, FAILURE_WINDOW_MS),
+      await this.limiter.retryAfterSeconds(
+        pairKey,
+        MAX_FAILURES_PER_EMAIL_AND_IP,
+        FAILURE_WINDOW_MS,
+      ),
+      await this.limiter.retryAfterSeconds(accountKey, MAX_FAILURES_PER_EMAIL, FAILURE_WINDOW_MS),
     );
     if (blockedFor > 0) {
       await this.audit.record({
@@ -131,8 +150,8 @@ export class AuthService {
     }
 
     if (!user || !passwordOk || user.status !== 'ACTIVE') {
-      this.limiter.hit(pairKey, MAX_FAILURES_PER_EMAIL_AND_IP, FAILURE_WINDOW_MS);
-      this.limiter.hit(accountKey, MAX_FAILURES_PER_EMAIL, FAILURE_WINDOW_MS);
+      await this.limiter.hit(pairKey, MAX_FAILURES_PER_EMAIL_AND_IP, FAILURE_WINDOW_MS);
+      await this.limiter.hit(accountKey, MAX_FAILURES_PER_EMAIL, FAILURE_WINDOW_MS);
       await this.audit.record({
         action: 'auth.login.failure',
         actorUserId: user?.id ?? null,
@@ -144,7 +163,7 @@ export class AuthService {
       throw new UnauthorizedException('Invalid email or password');
     }
 
-    this.limiter.clear(pairKey);
+    await this.limiter.clear(pairKey);
 
     // Session rotation: a successful login never reuses a session token. If the browser already
     // had a session, it is revoked atomically with issuing the new one (prevents fixation).
@@ -186,10 +205,12 @@ export class AuthService {
    * email delivery, so neither the response body nor its timing reveals account existence.
    */
   async requestPasswordReset(email: string, ctx: RequestContext): Promise<void> {
-    const withinEmailLimit = this.limiter.hit(
-      `reset-request:${email}`,
-      RESET_EMAILS_PER_ADDRESS_PER_HOUR,
-      60 * 60 * 1000,
+    const withinEmailLimit = (
+      await this.limiter.hit(
+        `reset-request:${email}`,
+        RESET_EMAILS_PER_ADDRESS_PER_HOUR,
+        60 * 60 * 1000,
+      )
     ).allowed;
     // Over the per-address limit: silently do nothing (a visible error would be an oracle and a
     // way to harass a victim's inbox only if we kept sending).
@@ -198,21 +219,9 @@ export class AuthService {
     const user = await this.prisma.user.findUnique({ where: { email } });
     if (!user || user.status !== 'ACTIVE') return;
 
-    const token = generateToken();
+    let token = '';
     await this.prisma.$transaction(async (tx) => {
-      // Serialise concurrent requests for the same user so "only the newest link works" holds.
-      await tx.$queryRaw`SELECT id FROM users WHERE id = ${user.id}::uuid FOR UPDATE`;
-      await tx.passwordResetToken.updateMany({
-        where: { userId: user.id, usedAt: null },
-        data: { usedAt: new Date() },
-      });
-      await tx.passwordResetToken.create({
-        data: {
-          userId: user.id,
-          tokenHash: hashToken(token),
-          expiresAt: new Date(Date.now() + PASSWORD_RESET_TTL_MS),
-        },
-      });
+      token = await this.createPasswordResetToken(tx, user.id, PASSWORD_RESET_TTL_MS);
       await this.audit.record(
         {
           action: 'auth.password_reset.requested',
@@ -245,6 +254,28 @@ export class AuthService {
       });
   }
 
+  /**
+   * Issues a single-use reset token inside the caller's transaction. Concurrent requests for the
+   * same user are serialised by a row lock so "only the newest link works" holds. Returns the raw
+   * token (emailed, never stored); the database keeps only its hash.
+   */
+  async createPasswordResetToken(
+    tx: Prisma.TransactionClient,
+    userId: string,
+    ttlMs: number,
+  ): Promise<string> {
+    const token = generateToken();
+    await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId}::uuid FOR UPDATE`;
+    await tx.passwordResetToken.updateMany({
+      where: { userId, usedAt: null },
+      data: { usedAt: new Date() },
+    });
+    await tx.passwordResetToken.create({
+      data: { userId, tokenHash: hashToken(token), expiresAt: new Date(Date.now() + ttlMs) },
+    });
+    return token;
+  }
+
   async confirmPasswordReset(
     input: { token: string; password: string },
     ctx: RequestContext,
@@ -265,6 +296,25 @@ export class AuthService {
 
       const record = await tx.passwordResetToken.findUniqueOrThrow({ where: { tokenHash } });
       await tx.user.update({ where: { id: record.userId }, data: { passwordHash } });
+      // Receiving the reset email proves control of the mailbox, so it also verifies the address.
+      const verified = await tx.user.updateMany({
+        where: { id: record.userId, emailVerifiedAt: null },
+        data: { emailVerifiedAt: now },
+      });
+      if (verified.count === 1) {
+        await this.audit.record(
+          {
+            action: 'auth.email_verified',
+            actorUserId: record.userId,
+            targetType: 'user',
+            targetId: record.userId,
+            ip: ctx.ip,
+            userAgent: ctx.userAgent,
+            metadata: { via: 'password_reset' },
+          },
+          tx,
+        );
+      }
       // A reset means the old credentials may be compromised: end every session and any other
       // outstanding reset links.
       await this.sessions.revokeAllForUser(record.userId, tx);
@@ -289,6 +339,8 @@ export class AuthService {
   /** Housekeeping for rows that can never be used again. */
   async purgeExpired(): Promise<void> {
     await this.sessions.deleteExpired();
+    await this.verification.purgeExpired();
+    await this.limiter.purgeExpired();
     await this.prisma.passwordResetToken.deleteMany({
       where: {
         OR: [

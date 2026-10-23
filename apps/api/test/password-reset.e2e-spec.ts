@@ -6,6 +6,7 @@ import {
   resetDatabase,
   sessionTokenFrom,
   sha256,
+  waitForMail,
   type TestContext,
 } from './support/test-app.js';
 
@@ -24,7 +25,7 @@ describe('Auth: password reset (e2e, real PostgreSQL)', () => {
   afterAll(() => ctx.close());
   beforeEach(async () => {
     await resetDatabase(ctx.prisma);
-    ctx.limiter.reset();
+    await ctx.limiter.reset();
     ctx.mail.sent.length = 0;
   });
 
@@ -47,6 +48,9 @@ describe('Auth: password reset (e2e, real PostgreSQL)', () => {
 
   beforeEach(async () => {
     await api.register({ email, name: 'Reset Me' }).expect(201);
+    // Registration sends a verification email; these tests are about reset mail only.
+    await waitForMail(ctx.mail, 1);
+    ctx.mail.sent.length = 0;
   });
 
   describe('request (enumeration safety)', () => {

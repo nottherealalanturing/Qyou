@@ -4,7 +4,7 @@ import { RateLimiter } from './rate-limiter.js';
 
 @Global()
 @Module({
-  providers: [{ provide: RateLimiter, useFactory: () => new RateLimiter() }, RateLimitGuard],
+  providers: [RateLimiter, RateLimitGuard],
   exports: [RateLimiter, RateLimitGuard],
 })
 export class RateLimitModule {}
