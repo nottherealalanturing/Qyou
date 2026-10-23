@@ -1,0 +1,9 @@
+packages:
+  - apps/*
+  - packages/*
+
+# Dependency lifecycle scripts are denied by default; allow only what is required.
+allowBuilds:
+  '@prisma/engines': true
+  prisma: true
+  '@scarf/scarf': false # analytics-only postinstall

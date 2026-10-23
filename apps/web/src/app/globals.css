@@ -1,0 +1,44 @@
+@import 'tailwindcss';
+
+/*
+ * Qyou design tokens. Warm coral accent on restrained warm neutrals.
+ * Contrast (on white): brand-600 4.7:1 (buttons, white text), brand-700 5.9:1 (coral text).
+ * brand-500 is decorative only (3.4:1) — never use it for text.
+ */
+@theme {
+  --color-brand-50: #fff1ee;
+  --color-brand-100: #ffe0d9;
+  --color-brand-500: #ef5b43;
+  --color-brand-600: #d13f29;
+  --color-brand-700: #b8341f;
+
+  --color-ink: #1f1d1b;
+  --color-ink-muted: #6b6560;
+  --color-surface: #ffffff;
+  --color-canvas: #fffbf8;
+  --color-line: #ece6e1;
+
+  --color-success: #1a7f4b;
+  --color-warning: #9a6700;
+  --color-danger: #c4271c;
+
+  --radius-card: 1rem;
+  --shadow-card: 0 1px 2px rgb(31 29 27 / 0.06), 0 4px 16px rgb(31 29 27 / 0.06);
+
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+@layer base {
+  html {
+    background: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-brand-700);
+    outline-offset: 2px;
+  }
+}

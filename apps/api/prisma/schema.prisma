@@ -1,0 +1,101 @@
+// Qyou data model. Phase 0 contains only the identity root; Phase 1 extends it.
+// Domain concepts (service request, quote, booking, payment, payout, wait report,
+// virtual ticket) are deliberately separate models — see docs/ARCHITECTURE.md.
+
+generator client {
+  provider       = "prisma-client"
+  output         = "../src/generated/prisma"
+  moduleFormat   = "esm"
+  importFileExtension = "js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  CUSTOMER
+  ASSISTANT
+  BUSINESS_STAFF
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+model User {
+  id           String     @id @default(uuid(7)) @db.Uuid
+  /// Normalised (NFKC, trimmed, lower-cased) by the application before every write/lookup.
+  email        String     @unique
+  name         String     @db.VarChar(80)
+  /// Argon2id PHC string. Never returned by any API response, never logged.
+  passwordHash String
+  role         UserRole   @default(CUSTOMER)
+  status       UserStatus @default(ACTIVE)
+  createdAt    DateTime   @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime   @updatedAt @db.Timestamptz(3)
+
+  sessions            Session[]
+  passwordResetTokens PasswordResetToken[]
+  auditLogs           AuditLog[]
+
+  @@map("users")
+}
+
+/// Database-backed login session. The cookie carries an opaque 256-bit random token;
+/// only its SHA-256 hash is stored here, so a database leak does not yield usable sessions.
+model Session {
+  id         String    @id @default(uuid(7)) @db.Uuid
+  userId     String    @db.Uuid
+  tokenHash  String    @unique @db.Char(64)
+  userAgent  String?   @db.VarChar(255)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
+  lastSeenAt DateTime  @default(now()) @db.Timestamptz(3)
+  /// Absolute expiry; the session cannot be extended past this.
+  expiresAt  DateTime  @db.Timestamptz(3)
+  revokedAt  DateTime? @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+/// Single-use, short-lived password-reset token (SHA-256 hash only).
+model PasswordResetToken {
+  id        String    @id @default(uuid(7)) @db.Uuid
+  userId    String    @db.Uuid
+  tokenHash String    @unique @db.Char(64)
+  expiresAt DateTime  @db.Timestamptz(3)
+  usedAt    DateTime? @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("password_reset_tokens")
+}
+
+/// Append-only record of security- and money-relevant actions.
+/// Must never contain passwords, tokens, hashes or other secrets.
+model AuditLog {
+  id          String   @id @default(uuid(7)) @db.Uuid
+  actorUserId String?  @db.Uuid
+  action      String   @db.VarChar(80)
+  targetType  String?  @db.VarChar(40)
+  targetId    String?  @db.VarChar(64)
+  ip          String?  @db.VarChar(64)
+  userAgent   String?  @db.VarChar(255)
+  metadata    Json?
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  actor User? @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([actorUserId, createdAt])
+  @@index([action, createdAt])
+  @@map("audit_logs")
+}

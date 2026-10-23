@@ -2,13 +2,16 @@ node_modules/
 dist/
 build/
 .next/
-.expo/
 .turbo/
 *.tsbuildinfo
 coverage/
 .env
 .env.local
 .env.*.local
+!.env.example
 npm-debug.log*
+pnpm-debug.log*
 .DS_Store
-target/
+# Prisma generated client (rebuilt by `pnpm --filter @qyou/api db:generate`)
+apps/api/src/generated/
+apps/web/next-env.d.ts

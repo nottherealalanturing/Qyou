@@ -1,0 +1,10 @@
+{
+  "extends": "@qyou/config/tsconfig.next.json",
+  "compilerOptions": {
+    "plugins": [{ "name": "next" }],
+    "paths": { "@/*": ["./src/*"] },
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["next-env.d.ts", "src", "vitest.config.mts", "next.config.ts", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}

@@ -1,0 +1,38 @@
+# Local development services. Not used in production.
+# Host port 5452 avoids clashing with other local Postgres instances.
+name: qyou
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: qyou
+      POSTGRES_PASSWORD: qyou_dev_password
+      POSTGRES_DB: qyou
+    ports:
+      - '127.0.0.1:${QYOU_DB_PORT:-5452}:5432'
+    volumes:
+      - qyou_pgdata:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U qyou -d qyou']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # Local email sink for password-reset and other transactional mail. Never used in production.
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    ports:
+      - '127.0.0.1:${QYOU_SMTP_PORT:-1052}:1025'
+      - '127.0.0.1:${QYOU_MAILPIT_UI_PORT:-8052}:8025'
+    healthcheck:
+      test: ['CMD', '/mailpit', 'readyz']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  qyou_pgdata:
