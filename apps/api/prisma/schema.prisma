@@ -131,3 +131,146 @@ model RateLimitCounter {
   @@index([windowStart])
   @@map("rate_limit_counters")
 }
+
+// ───────────────────────── Reference data (M1.3) ─────────────────────────
+// Public to read, admin-only to write, always audited. See docs/ARCHITECTURE.md
+// "Reference data model". CHECK constraints (hand-written in the migration) enforce the task
+// eligibility invariants, slug format and coordinate ranges.
+
+enum TaskKind {
+  QUEUE_HOLDING
+  ERRAND
+}
+
+enum TaskEligibility {
+  ELIGIBLE
+  REQUIRES_AUTHORIZATION
+  NOT_DELEGABLE
+}
+
+enum LocationStatus {
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+  ARCHIVED
+}
+
+enum RestrictionRule {
+  PROHIBITED
+  REQUIRES_AUTHORIZATION
+  ADVISORY
+}
+
+/// A launch city. Deliberately NOT a venue: venues are ServiceLocation rows inside a city.
+model City {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  slug      String   @unique @db.VarChar(60)
+  name      String   @db.VarChar(80)
+  state     String   @db.VarChar(80)
+  /// Approximate city centre.
+  latitude  Decimal  @db.Decimal(9, 6)
+  longitude Decimal  @db.Decimal(9, 6)
+  timezone  String   @default("Africa/Lagos") @db.VarChar(40)
+  isActive  Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  locations ServiceLocation[]
+
+  @@unique([state, name])
+  @@index([isActive, sortOrder])
+  @@map("cities")
+}
+
+model ServiceCategory {
+  id          String   @id @default(uuid(7)) @db.Uuid
+  slug        String   @unique @db.VarChar(60)
+  name        String   @db.VarChar(80)
+  /// lower(trim(name)), maintained by the application: case-insensitive uniqueness.
+  nameKey     String   @unique @db.VarChar(80)
+  description String   @db.VarChar(500)
+  /// Key into the web app's icon set (presentation hint only).
+  iconKey     String   @db.VarChar(30)
+  isActive    Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  tasks     EligibleTask[]
+  locations ServiceLocation[]
+
+  @@index([isActive, sortOrder])
+  @@map("service_categories")
+}
+
+model EligibleTask {
+  id                       String          @id @default(uuid(7)) @db.Uuid
+  categoryId               String          @db.Uuid
+  slug                     String          @db.VarChar(60)
+  name                     String          @db.VarChar(100)
+  nameKey                  String          @db.VarChar(100)
+  description              String          @db.VarChar(500)
+  kind                     TaskKind
+  eligibility              TaskEligibility
+  requiresPersonalPresence Boolean         @default(false)
+  requiresCredentials      Boolean         @default(false)
+  /// Mandatory when eligibility = REQUIRES_AUTHORIZATION: exactly what the customer must provide.
+  authorizationNotes       String?         @db.VarChar(1000)
+  /// Mandatory when eligibility = NOT_DELEGABLE: why it cannot be done.
+  restrictionNotes         String?         @db.VarChar(1000)
+  isActive                 Boolean         @default(true)
+  sortOrder                Int             @default(0)
+  createdAt                DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt                DateTime        @updatedAt @db.Timestamptz(3)
+
+  category     ServiceCategory       @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  restrictions LocationRestriction[]
+
+  @@unique([categoryId, slug])
+  @@unique([categoryId, nameKey])
+  @@index([categoryId, isActive, sortOrder])
+  @@map("eligible_tasks")
+}
+
+/// A real venue entered by an administrator. Starts empty: nothing is invented.
+model ServiceLocation {
+  id         String         @id @default(uuid(7)) @db.Uuid
+  cityId     String         @db.Uuid
+  categoryId String         @db.Uuid
+  slug       String         @unique @db.VarChar(100)
+  name       String         @db.VarChar(120)
+  address    String         @db.VarChar(250)
+  latitude   Decimal?       @db.Decimal(9, 6)
+  longitude  Decimal?       @db.Decimal(9, 6)
+  status     LocationStatus @default(PENDING_REVIEW)
+  createdAt  DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime       @updatedAt @db.Timestamptz(3)
+
+  city         City                  @relation(fields: [cityId], references: [id], onDelete: Restrict)
+  category     ServiceCategory       @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  restrictions LocationRestriction[]
+
+  @@index([cityId, status])
+  @@index([categoryId, status])
+  @@index([status, name])
+  @@map("service_locations")
+}
+
+/// Venue-specific rule. `taskId = null` applies to the whole venue.
+model LocationRestriction {
+  id         String          @id @default(uuid(7)) @db.Uuid
+  locationId String          @db.Uuid
+  taskId     String?         @db.Uuid
+  rule       RestrictionRule
+  note       String          @db.VarChar(500)
+  createdAt  DateTime        @default(now()) @db.Timestamptz(3)
+
+  location ServiceLocation @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  task     EligibleTask?   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  // NULLS NOT DISTINCT is applied by hand in the migration (Prisma cannot express it).
+  @@unique([locationId, taskId, rule])
+  @@index([locationId])
+  @@map("location_restrictions")
+}

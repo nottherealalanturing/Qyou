@@ -11,6 +11,9 @@ import { ZodValidationPipe } from './common/zod/zod-validation.pipe.js';
 import { parseEnv } from './config/env.js';
 import { HealthModule } from './health/health.module.js';
 import { MailModule } from './mail/mail.module.js';
+import { SeedModule } from './seed/seed.module.js';
+import { ServiceCategoriesModule } from './service-categories/service-categories.module.js';
+import { ServiceLocationsModule } from './service-locations/service-locations.module.js';
 import { PrismaModule } from './prisma/prisma.module.js';
 
 @Module({
@@ -22,6 +25,9 @@ import { PrismaModule } from './prisma/prisma.module.js';
     MailModule,
     AuthModule,
     AdminModule,
+    ServiceCategoriesModule,
+    ServiceLocationsModule,
+    SeedModule,
     HealthModule,
   ],
   providers: [

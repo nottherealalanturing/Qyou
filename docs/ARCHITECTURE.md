@@ -1,6 +1,6 @@
 # Qyou — Architecture
 
-Status: **Phase 0, M1.1 (authentication) and M1.2 (authorization & account security) implemented;
+Status: **Phase 0, M1.1 (authentication), M1.2 (authorization & account security) and M1.3 (reference data & discovery) implemented;
 everything else is design intent** and is marked as such. When code and this document disagree, the code wins — fix the document.
 
 ## Shape
@@ -8,8 +8,8 @@ everything else is design intent** and is marked as such. When code and this doc
 Modular monolith in a pnpm TypeScript monorepo. No microservices.
 
 ```
-apps/api            NestJS 12 (ESM) REST API, Prisma 7 → PostgreSQL 17     [implemented: health, auth, authz, admin]
-apps/web            Next.js 16 App Router, React 19, Tailwind 4             [implemented: shell, auth/account pages, CSP]
+apps/api            NestJS 12 (ESM) REST API, Prisma 7 → PostgreSQL 17     [implemented: health, auth, authz, admin, service-categories, service-locations, seed]
+apps/web            Next.js 16 App Router, React 19, Tailwind 4             [implemented: shell, auth/account pages, CSP, discovery pages]
 packages/config     Shared tsconfig bases                                   [implemented]
 packages/contracts  Shared API schemas/types — only when it earns its keep  [not created; D-007]
 docs/               Product, architecture, decisions, roadmap, progress, runbook
@@ -218,14 +218,115 @@ for CSP, nonce on every `<script>`, no inline `style=`/handlers, per-request non
 the token pages' `Referrer-Policy: no-referrer`; and a manual browser run (hydration + full flows,
 console clean). Not covered: Trusted Types, CSP reporting endpoint.
 
+### Reference data model (M1.3, implemented — documented before the migration was applied)
+
+Cities, categories, tasks and locations are **reference data**: public to read, writable only by
+administrators, every write audited. They contain **no assistants, reviews, wait times or
+invented businesses** — locations start empty and are entered (and approved) by administrators.
+
+```
+City 1───* ServiceLocation *───1 ServiceCategory 1───* EligibleTask
+                  │                                          ▲
+                  └──1───* LocationRestriction *──(0..1)─────┘   (null task = whole venue)
+```
+
+| Entity                | Purpose                                                                                    | Key fields                                                                                                                                                                                            |
+| --------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `City`                | A launch city — **not** a venue.                                                           | `slug` (unique, immutable), `name`, `state`, `latitude/longitude` (approximate centre), `timezone`, `isActive`, `sortOrder`                                                                           |
+| `ServiceCategory`     | A kind of place people queue at.                                                           | `slug` (unique, immutable), `name` (unique case-insensitively via `nameKey`), `description`, `iconKey`, `isActive`, `sortOrder`                                                                       |
+| `EligibleTask`        | One thing an assistant may or may not do within a category, **with explicit eligibility**. | `categoryId`, `slug` (unique per category), `kind` (`QUEUE_HOLDING`/`ERRAND`), `eligibility`, `requiresPersonalPresence`, `requiresCredentials`, `authorizationNotes`, `restrictionNotes`, `isActive` |
+| `ServiceLocation`     | A real venue (bank branch, office, clinic…) in a city, entered by an admin.                | `cityId`, `categoryId`, `slug` (unique), `name`, `address`, optional coordinates, `status` (`PENDING_REVIEW`/`APPROVED`/`REJECTED`/`ARCHIVED`), `reviewedByUserId/At`                                 |
+| `LocationRestriction` | Venue-specific rule modelled explicitly, never hard-coded in UI copy.                      | `locationId`, optional `taskId` (null ⇒ whole venue), `rule` (`PROHIBITED`/`REQUIRES_AUTHORIZATION`/`ADVISORY`), `note`                                                                               |
+
+**Task eligibility** (the "what may be delegated" rules from PRODUCT.md, as data):
+
+- `ELIGIBLE` — an assistant may do it as described.
+- `REQUIRES_AUTHORIZATION` — only with the customer's written authorization/documents;
+  `authorizationNotes` (mandatory) says exactly what.
+- `NOT_DELEGABLE` — listed on purpose so the product can explain _why not_ and booking (Phase 2) can
+  reject it; `restrictionNotes` (mandatory) gives the reason (personal presence, credentials,
+  impersonation risk, or a launch-policy exclusion such as handling customers' cash).
+
+**Database-enforced invariants** (CHECK constraints, so no code path or manual SQL can violate
+them; also validated in the API for friendly errors): a task that needs the customer's personal
+presence or credentials _must_ be `NOT_DELEGABLE`; `REQUIRES_AUTHORIZATION` needs
+`authorizationNotes`; `NOT_DELEGABLE` needs `restrictionNotes`; slugs match
+`^[a-z0-9]+(-[a-z0-9]+)*$`; coordinates are in range and come as a pair.
+
+**Visibility.** Public reads only ever return: active categories/tasks, active cities, and
+locations with `status = APPROVED` **whose category and city are also active**. Anything else is
+indistinguishable from "does not exist" (404). Admin endpoints see everything.
+
+**Writes.** Administrator only (`@AdminOnly`, verified email), each in one transaction with its
+audit row (`admin.<entity>.created|updated`, changed fields as `{before, after}`). Slugs are
+immutable (stable URLs); there is **no hard delete** — records are deactivated/archived — so
+history and references stay intact. Duplicates (slug, case-insensitive name) → 409.
+
+**Indexes.** Unique: slugs; `nameKey`; `(categoryId, slug)`; `(locationId, taskId, rule)` with
+`NULLS NOT DISTINCT`. Query paths: `service_locations (cityId, status)`, `(categoryId, status)`,
+`(status, name)`; `eligible_tasks (categoryId, isActive)`; `service_categories (isActive, sortOrder)`.
+Search is `ILIKE` over a few hundred rows per city — a trigram index is the documented upgrade
+path when volumes justify it.
+
+**Seed.** `pnpm --filter @qyou/api db:seed` inserts _missing_ categories (7), tasks (25) and the four
+launch cities (Kaduna, Abuja, Kano, Lagos) with `ON CONFLICT DO NOTHING` in one transaction. It never
+modifies, reactivates or deletes existing rows (administrator edits win), audits once only when something
+was created, and seeds **no locations**. Seed data is validated against the same delegation rules at
+runtime and in a unit test that also forbids business names and review/wait-time vocabulary.
+
+#### API surface
+
+Public (`@Public`, no authentication, `Cache-Control: public, max-age=60` on success only):
+
+| Endpoint                                               | Returns                                                                                                 |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
+| `GET /service-categories`                              | `{ items }` active categories with `taskCount` and `locationCount` (public venues only)                 |
+| `GET /service-categories/:slug`                        | `{ category, tasks }` active tasks with eligibility, notes, flags; 404 if inactive/unknown              |
+| `GET /cities`, `GET /cities/:slug`                     | active cities with `locationCount`                                                                      |
+| `GET /service-locations?city&category&q&page&pageSize` | `{ items, page, pageSize, total, totalPages }`, approved venues only, `pageSize ≤ 50`, order `name, id` |
+| `GET /service-locations/:slug`                         | `{ location, tasks, restrictions }` — each task with `effectiveEligibility` and `venueNotes`            |
+
+Administrator only (`@AdminOnly`: verified admin; CSRF-checked; each write = one transaction + one audit
+row `admin.<entity>.created|updated`, changes as `{field: {from, to}}`; a no-op PATCH writes nothing):
+
+| Endpoint                                                                                 | Notes                                                                                                |
+| ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `GET/POST /admin/service-categories`, `GET/PATCH /admin/service-categories/:id`          | slug optional (derived), immutable; duplicate slug or case-insensitive name → 409                    |
+| `GET/POST /admin/service-categories/:id/tasks`, `PATCH /admin/eligible-tasks/:id`        | delegation rules validated on the **merged** state; duplicate slug/name within a category → 409      |
+| `GET/POST /admin/cities`, `PATCH /admin/cities/:id`                                      | IANA timezone and coordinate ranges validated                                                        |
+| `GET/POST /admin/service-locations`, `GET/PATCH /admin/service-locations/:id`            | created `PENDING_REVIEW` unless `APPROVED` given; status state machine; city/category/slug immutable |
+| `POST /admin/service-locations/:id/restrictions`, `DELETE …/restrictions/:restrictionId` | task must belong to the venue's category; duplicates → 409                                           |
+
+Error contract: 400 `{message:"Validation failed", issues:[{path,message}]}` (never echoes values), 401/403
+as in Authorization, 404 for unknown **or non-public** records (identical bodies), 409 for conflicts.
+
+#### Web discovery (M1.3)
+
+`/` (hero search, categories, launch cities, a plain "what's live today" box), `/search` (filters + cards +
+pagination), `/categories/[slug]` (tasks grouped _Available → Needs your authorization → Not available_, with
+exactly what to provide or why not), `/locations/[slug]` (venue rules, effective eligibility). Server components
+fetch the public API; failures render explicit _unavailable_ states, empty data renders honest empty states
+(counts say "no locations yet"). Search is a native GET form (no JavaScript needed). Eligibility is always conveyed with
+text and an icon, never colour alone. Booking is not offered anywhere: the pages say so.
+
+#### Tests (M1.3)
+
+`test/reference-data-public|admin|integrity.e2e-spec.ts` against real PostgreSQL as the runtime role: public
+visibility rules (inactive/pending/rejected/archived/hidden-by-parent all 404 like unknown), filters, literal
+`%`/`_` search, stable pagination, validation limits, cache headers (success only); authorization on **every**
+admin endpoint (anonymous, customer/assistant/business, unverified admin, cross-origin); every write audited
+exactly once and failed writes never; atomic audit (a failing audit rolls the write back); concurrency (racing
+duplicates → exactly one winner); CHECK constraints and `NULLS NOT DISTINCT` exercised with raw SQL as the owner;
+`RESTRICT` foreign keys; seed idempotence, non-destructiveness and partial-state repair.
+
 ## Planned backend modules (design intent)
 
 `auth · users · assistants · verification · service-categories · service-locations ·
 service-requests · matching · bookings · tracking · messaging · payments · reviews · disputes ·
 notifications · favorites · wait-reports · virtual-queues · businesses · admin`
 
-Implemented so far: `auth` (with `audit`, `mail`, rate limiting as shared infrastructure) and
-`health`. Rules: one module per cohesive responsibility, not per noun; modules depend on each other through
+Implemented so far: `auth`, `authz`, `admin`, `service-categories`, `service-locations`, `seed` (with
+`audit`, `mail`, rate limiting as shared infrastructure) and `health`. Rules: one module per cohesive responsibility, not per noun; modules depend on each other through
 exported services only; no circular dependencies; business rules live in domain services (not
 controllers); create modules when their phase starts, not before. `rewards` (Stellar) is
 deferred and sits behind an interface (see Stellar).

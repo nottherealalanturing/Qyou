@@ -65,3 +65,14 @@ streams. Stellar-based rewards/receipts are optional and isolated; the marketpla
   production paths.
 
 Per-milestone acceptance criteria live in ROADMAP.md and are checked off in PROGRESS.md.
+
+## Launch requirements (not optional)
+
+These are accepted gaps for development/private testing and **must be closed before public launch**
+(tracked as gates in ROADMAP.md):
+
+- **Enumeration-safe registration** — signing up must not reveal whether an email already has an account.
+- Real payment provider with decided fees, refund/cancellation and payout policy.
+- Reference data (categories, task wording, per-venue restrictions) reviewed by the owner, and real venues
+  entered by administrators — Qyou never launches with invented businesses, reviews or wait times.
+- A green CI run, a browser smoke suite, production database roles/secrets, and HTTPS settings.

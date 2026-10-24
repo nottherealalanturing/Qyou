@@ -3,7 +3,15 @@
 //   node scripts/verify-security-headers.mjs [baseUrl]      (default http://localhost:3000)
 // Exits non-zero on any problem. Used locally and in CI after `next start`.
 const base = (process.argv[2] ?? 'http://localhost:3000').replace(/\/+$/, '');
-const pages = ['/', '/login', '/register', '/forgot-password', '/reset-password', '/verify-email'];
+const pages = [
+  '/',
+  '/search',
+  '/login',
+  '/register',
+  '/forgot-password',
+  '/reset-password',
+  '/verify-email',
+];
 const problems = [];
 const fail = (page, message) => problems.push(`${page}: ${message}`);
 

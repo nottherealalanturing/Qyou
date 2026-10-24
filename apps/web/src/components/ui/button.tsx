@@ -3,7 +3,7 @@ import type { ButtonHTMLAttributes, ReactNode } from 'react';
 type Variant = 'primary' | 'secondary' | 'ghost';
 
 const base =
-  'inline-flex items-center justify-center gap-2 rounded-xl font-semibold transition-colors ' +
+  'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-xl font-semibold transition-colors ' +
   'disabled:cursor-not-allowed disabled:opacity-60';
 
 const variants: Record<Variant, string> = {

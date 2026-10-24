@@ -21,11 +21,17 @@ Suggested milestone order (each is a small vertical slice with its own tests):
   admin role assignment + CLI-only administrator bootstrap, email verification, change password,
   log out everywhere, session list/revoke API, DB-level audit immutability (runtime role +
   triggers), PostgreSQL-backed rate limiter, web CSP.
-- ⬜ M1.3 Service categories, eligible tasks, service locations (seeded real reference data)
+- ✅ **M1.3 Reference data & discovery**: cities / categories / eligible tasks / locations /
+  venue restrictions (migration with CHECK-enforced delegation rules), public read APIs, admin-only
+  audited writes, insert-only seed (4 cities, 7 categories, 25 tasks, **no venues**), initial web
+  discovery (home, search, category, location pages).
 - ⬜ M1.4 Assistant profile, onboarding, verification workflow (admin review queue)
 - ⬜ M1.5 Search & discovery API (filters/sort) and quote/request models
 - ⬜ M1.6 Design system foundation (shadcn/ui + Radix evaluation, tokens) and the polished
   homepage, search results, assistant profile, with loading/empty/error states
+- ⬜ **M1.8 Enumeration-safe registration — LAUNCH REQUIREMENT (D-021).** Same neutral response for new and
+  existing addresses, different emails, equal timing, updated web flow and tests. Scheduled before Phase 2
+  starts building on sign-up, and a hard gate for public launch.
 - ⬜ M1.7 Playwright e2e baseline (register→verify→login→logout→reset; asserts no CSP violations;
   run in CI). _Deferred from M1.2, see D-031._
 
@@ -56,20 +62,36 @@ real-time updates, business metrics.
 Reconciliation + payouts, ops dashboards/financial reporting, abuse/moderation, security review,
 performance tests, production deployment docs, growth features, optional Stellar evaluation.
 
-## Deferred / tracked items (from M1.1–M1.2 reviews)
+## Launch gates (must be true before any public launch)
 
-| Item                                                                                        | Why deferred                                        | Planned                 |
-| ------------------------------------------------------------------------------------------- | --------------------------------------------------- | ----------------------- |
-| Transactional email outbox (retries, dead letters)                                          | would persist raw tokens unless redesigned (D-020)  | Phase 3                 |
-| Enumeration-safe registration (D-021)                                                       | conflicts with the signup→book funnel; rate-limited | before launch / Phase 6 |
-| Playwright browser suite (D-031)                                                            | own milestone                                       | M1.7                    |
-| First real CI run (D-032)                                                                   | needs a push; nothing pushed                        | when the owner pushes   |
-| Audit tamper-evidence (hash chain), off-box shipping, alerting on trigger/privilege changes | beyond in-DB controls (D-028)                       | Phase 6                 |
-| Sessions list UI on `/account` (API exists)                                                 | not required by the milestone                       | with M1.6 design pass   |
-| 2FA / login-alert emails / Argon2 rehash-on-login                                           | scope                                               | Phase 6                 |
-| CSP reporting endpoint, Trusted Types                                                       | scope                                               | Phase 6                 |
-| Redis rate limiter                                                                          | only if profiling shows DB load (D-017)             | Phase 6                 |
-| Non-superuser DB owner + secret management in production                                    | deployment work                                     | Phase 6                 |
+| Gate                                                                                                                                  | Where tracked  | Status            |
+| ------------------------------------------------------------------------------------------------------------------------------------- | -------------- | ----------------- |
+| Enumeration-safe registration                                                                                                         | M1.8, D-021    | ⬜ scheduled      |
+| Payment provider chosen; fees/refund/payout policy decided                                                                            | D-012          | ⬜ owner decision |
+| First real CI run is green                                                                                                            | D-032          | ⬜ needs a push   |
+| Playwright smoke suite in CI                                                                                                          | M1.7, D-031    | ⬜                |
+| Non-superuser DB owner, secrets management, `FORCE_HTTPS`, real SMTP                                                                  | Phase 6        | ⬜                |
+| Audit-log off-box shipping / tamper evidence                                                                                          | Phase 6, D-028 | ⬜                |
+| Reference data reviewed by the owner (categories, task wording, per-venue restrictions) and real venues entered through the admin API | M1.3 follow-up | ⬜ owner/ops task |
+
+## Deferred / tracked items (from M1.1–M1.3 reviews)
+
+| Item                                                                                        | Why deferred                                       | Planned                    |
+| ------------------------------------------------------------------------------------------- | -------------------------------------------------- | -------------------------- |
+| Transactional email outbox (retries, dead letters)                                          | would persist raw tokens unless redesigned (D-020) | Phase 3                    |
+| ~~Enumeration-safe registration (D-021)~~ — now a **launch gate** (M1.8)                    | scheduled, not deferred                            | M1.8                       |
+| Admin web UI for reference data (administration is API-only today)                          | M1.3 scope was API + discovery                     | M1.6 design pass / Phase 6 |
+| Venue submissions by businesses or the community (venues come only from administrators)     | needs moderation and provenance design             | Phase 4–5                  |
+| Trigram/full-text search, geo-distance sorting, map                                         | volumes don't justify it yet (D-036)               | Phase 4                    |
+| Shared contracts package or OpenAPI response schemas (D-007)                                | drift guarded by shape tests                       | when shapes churn          |
+| Playwright browser suite (D-031)                                                            | own milestone                                      | M1.7                       |
+| First real CI run (D-032)                                                                   | needs a push; nothing pushed                       | when the owner pushes      |
+| Audit tamper-evidence (hash chain), off-box shipping, alerting on trigger/privilege changes | beyond in-DB controls (D-028)                      | Phase 6                    |
+| Sessions list UI on `/account` (API exists)                                                 | not required by the milestone                      | with M1.6 design pass      |
+| 2FA / login-alert emails / Argon2 rehash-on-login                                           | scope                                              | Phase 6                    |
+| CSP reporting endpoint, Trusted Types                                                       | scope                                              | Phase 6                    |
+| Redis rate limiter                                                                          | only if profiling shows DB load (D-017)            | Phase 6                    |
+| Non-superuser DB owner + secret management in production                                    | deployment work                                    | Phase 6                    |
 
 ## Dependency notes
 

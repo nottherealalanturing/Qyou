@@ -10,3 +10,11 @@ export function clientUserAgent(req: Request): string | undefined {
   const ua = req.headers['user-agent'];
   return typeof ua === 'string' && ua.length > 0 ? ua.slice(0, MAX_UA) : undefined;
 }
+
+/** Context recorded with audit events. */
+export function requestContext(req: Request): {
+  ip: string | undefined;
+  userAgent: string | undefined;
+} {
+  return { ip: clientIp(req), userAgent: clientUserAgent(req) };
+}

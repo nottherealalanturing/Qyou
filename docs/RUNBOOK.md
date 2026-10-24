@@ -45,18 +45,48 @@ resend button.
 Health: `GET /api/v1/health/live` (process) and `/api/v1/health/ready` (PostgreSQL reachable; 503
 when down).
 
+## Reference data: seed and administration
+
+```bash
+pnpm --filter @qyou/api db:seed       # 4 cities, 7 categories, 25 tasks; idempotent, never overwrites; NO venues
+```
+
+The seed connects as the **runtime** role (`DATABASE_URL`) and needs the migrations applied first. Running it
+again prints `0 … created (already up to date)`. Edits and deactivations made by administrators are preserved.
+
+Everything else is managed through the admin API as a verified administrator (log in first; the examples use
+the session cookie and the `Origin` header the browser would send):
+
+```bash
+# list categories / cities / locations (all statuses)
+curl -b cookies.txt localhost:4000/api/v1/admin/service-categories
+# add a REAL venue you have verified (it starts PENDING_REVIEW unless you pass "status":"APPROVED")
+curl -b cookies.txt -H 'Content-Type: application/json' -H 'Origin: http://localhost:3000' \
+  -X POST localhost:4000/api/v1/admin/service-locations \
+  -d '{"cityId":"<city id>","categoryId":"<category id>","name":"<venue name>","address":"<address>"}'
+# approve it (PENDING_REVIEW -> APPROVED), then it appears publicly within ~60 s
+curl -b cookies.txt -H 'Content-Type: application/json' -H 'Origin: http://localhost:3000' \
+  -X PATCH localhost:4000/api/v1/admin/service-locations/<id> -d '{"status":"APPROVED"}'
+```
+
+Rules to remember: never enter a venue you have not verified (Qyou does not launch with invented businesses);
+city, category and slug of a location cannot change (create a new one and archive the old); records are
+deactivated or archived, never deleted; a venue's own restrictions can only make a task stricter. Every change
+shows up in `audit_logs` (`admin.service_location.updated` etc.). OpenAPI lists all endpoints at `/docs`.
+Public reads are cached for 60 s, so a change can take up to a minute to appear.
+
 ## Checks
 
-| Command               | What it does                                                                                                                                            |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm format:check`   | Prettier                                                                                                                                                |
-| `pnpm lint`           | oxlint, warnings are errors                                                                                                                             |
-| `pnpm typecheck`      | `tsc --noEmit` in both apps (generates Prisma client / Next types)                                                                                      |
-| `pnpm test`           | Unit tests (Vitest), no database needed                                                                                                                 |
-| `pnpm test:e2e`       | API e2e against the real `qyou_test` database (needs `db:up`)                                                                                           |
-| `pnpm build`          | Production builds                                                                                                                                       |
-| `pnpm verify:headers` | Black-box CSP/security-header check of a **running production web build** (`pnpm --filter @qyou/web build && pnpm --filter @qyou/web start`, then this) |
-| `pnpm check`          | All of the above, in CI order                                                                                                                           |
+| Command               | What it does                                                                                                                                                                                      |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm format:check`   | Prettier                                                                                                                                                                                          |
+| `pnpm lint`           | oxlint, warnings are errors                                                                                                                                                                       |
+| `pnpm typecheck`      | `tsc --noEmit` in both apps (generates Prisma client / Next types)                                                                                                                                |
+| `pnpm test`           | Unit tests (Vitest), no database needed                                                                                                                                                           |
+| `pnpm test:e2e`       | API e2e against the real `qyou_test` database (needs `db:up`)                                                                                                                                     |
+| `pnpm build`          | Production builds                                                                                                                                                                                 |
+| `pnpm verify:headers` | Black-box CSP/security-header check of a **running production web build** (`pnpm --filter @qyou/web build && pnpm --filter @qyou/web start`, then this; covers `/`, `/search` and the auth pages) |
+| `pnpm check`          | All of the above, in CI order                                                                                                                                                                     |
 
 ## Database & migrations
 
@@ -196,3 +226,13 @@ rate limits are PostgreSQL-backed and safe across instances (D-017); SMTP must b
   invalidates older links; log in and use _Send verification email_ on `/account`.
 - **Rate limits** are stored in PostgreSQL (`rate_limit_counters`), so restarting the API does not
   clear them. To clear locally: `DELETE FROM rate_limit_counters` (as any role with DML).
+- **A location I created isn't visible** — it must be `APPROVED`, and its category and city must be active;
+  hidden records return 404 exactly like unknown ones. Allow up to 60 s for the public cache.
+- **`409` creating a category/city/location** — slug or (case-insensitive) name already exists; slugs are
+  immutable, so pick a different one or edit the existing record.
+- **`400` saving a task** — the delegation rules: a task needing personal presence or credentials must be
+  `NOT_DELEGABLE`; `REQUIRES_AUTHORIZATION` needs `authorizationNotes`; `NOT_DELEGABLE` needs `restrictionNotes`.
+- **`409` changing a location's status** — only `PENDING_REVIEW→APPROVED|REJECTED`, `APPROVED→ARCHIVED`,
+  `REJECTED→PENDING_REVIEW`, `ARCHIVED→APPROVED` are allowed.
+- **Home page shows "We couldn't load the categories"** — the web app can't reach the API (`API_BASE_URL`) or the
+  API/DB is down; run `pnpm db:seed` if the API is up but categories are empty.

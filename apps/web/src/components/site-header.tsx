@@ -13,6 +13,9 @@ export async function SiteHeader() {
           Qyou
         </Link>
         <nav aria-label="Account" className="flex items-center gap-2">
+          <Link href="/search" className={buttonClasses('ghost', 'sm')}>
+            Explore
+          </Link>
           {session.state === 'authenticated' ? (
             <>
               <Link href="/account" className={buttonClasses('ghost', 'sm')}>

@@ -18,7 +18,8 @@
     "db:status": "prisma migrate status",
     "db:validate": "prisma validate",
     "db:deploy:test": "MIGRATION_DATABASE_URL=\"${TEST_ADMIN_DATABASE_URL:-postgresql://qyou:qyou_dev_password@localhost:5452/qyou_test?schema=public}\" prisma migrate deploy",
-    "admin:create": "nest build && node dist/cli/create-admin.js"
+    "admin:create": "nest build && node dist/cli/create-admin.js",
+    "db:seed": "nest build && node dist/cli/seed-reference-data.js"
   },
   "dependencies": {
     "@nestjs/common": "^12.2.0",

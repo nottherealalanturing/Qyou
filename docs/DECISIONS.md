@@ -30,9 +30,12 @@ manually. UUIDv7 primary keys, `timestamptz`, snake_case table names via `@@map`
 runs from the repo root with `--deny-warnings`; rules that are noise for this stack (React 19
 JSX runtime, empty decorated Nest modules) are off. Type-aware lint rules are not enabled yet.
 
-**D-007 `packages/contracts` deferred.** A shared package only when there is genuine value. Plan:
-API owns zod schemas + OpenAPI; decide in Phase 1 whether the web consumes generated types
-(openapi-typescript) or a shared zod package. `packages/config` exists now (tsconfig bases).
+**D-007 `packages/contracts` still deferred (re-reviewed in M1.3).** M1.3 added the first public
+response shapes the web consumes (categories, tasks, cities, locations). They are mirrored by hand in
+`apps/web/src/lib/catalog.ts`; drift is guarded because the API e2e tests assert the exact field set
+of every public response and the web has unit tests against the same shapes. Revisit (zod schemas in a
+shared package, or generated OpenAPI types) when a second consumer appears or the shapes churn; response
+schemas are not yet in OpenAPI.
 
 **D-008 PostgreSQL 17 via Docker Compose, host port 5452.** 5432/5433/5442 were occupied by other
 local containers. A second database `qyou_test` is created by an init script for e2e tests so
@@ -107,15 +110,19 @@ admin bootstrap reports `emailSent: false` explicitly, and tokens are 24 h/30 mi
 Phase 3 notifications, designed as an outbox that stores template + recipient and mints the token
 at send time (so no secret is stored) with retries and a dead-letter view.
 
-**D-021 Registration still reveals duplicate emails (409) — re-reviewed and deferred in M1.2.**
-Enumeration-safe sign-up (always "check your email") means an email-first flow: no session until
-the address is verified. That would hurt the core marketplace funnel (register → immediately book)
-and now conflicts with the chosen policy that only _commitments_ require a verified email. What we
-have instead: registration is rate-limited (10/h/IP), login and reset are fully enumeration-safe,
-and verification links reveal nothing. Residual risk: an attacker can test whether an address has an
-account (low severity, rate-limited). **Revisit before public launch / Phase 6 abuse work**, with
-options: (a) per-email + CAPTCHA-style friction on duplicates, (b) email-first registration for
-high-risk roles only (assistants), (c) full email-first sign-up.
+**D-021 Enumeration-safe registration is a LAUNCH REQUIREMENT (decided 2026-10-23; scheduled as
+M1.8, before Phase 2 and in any case before public launch).** Today registration returns 409 for an
+existing email, so anyone can test whether an address has an account (rate-limited at 10/h/IP;
+login, password reset and verification are already enumeration-safe). That is acceptable for
+development and private testing only. **Required design for M1.8:** `POST /auth/register` always
+answers with the same neutral response ("check your email") whether or not the address exists; a new
+address gets a verification email and its account is created unverified; an existing address gets
+a different email ("someone tried to register with your address; you already have an account — log in
+or reset your password") and nothing else changes. Timing must not differ (do the work
+asynchronously/equal-cost). This changes the sign-up UX (no instant session; the user confirms by email
+or the first login is allowed but flagged unverified — to be decided in M1.8 with the funnel in mind) and
+the web register page and tests. It is tracked in ROADMAP → "Launch gates". Authentication behaviour is
+**deliberately not changed in M1.3.**
 
 **D-022 Email verification — implemented in M1.2.** Single-use 24 h tokens bound to the address,
 hash-only storage, idempotent confirm, concurrency-safe, rate-limited; completing a password reset
@@ -190,6 +197,55 @@ been pushed; the workflow was updated for the runtime/owner roles and header ver
 YAML parses, and every command in it was run locally in the same order. It is **not** evidence
 that CI passes. First real run happens when the owner pushes; expect possible environment
 differences (Postgres service superuser, `psql` availability, `next start` readiness).
+
+**D-033 Reference-data model: cities are places, not venues; one category per location; eligibility
+as data with database-enforced rules.** `City` (launch places) and `ServiceLocation` (a real venue,
+entered by an administrator) are separate tables, so a city can exist with zero venues and nothing is
+ever invented to fill it. A location has exactly one `ServiceCategory` (a branch is a bank); multi-category
+venues can be modelled as separate records until a real need appears. `EligibleTask` carries the
+delegation rules from PRODUCT.md as **data** (`ELIGIBLE` / `REQUIRES_AUTHORIZATION` / `NOT_DELEGABLE`, with
+mandatory authorization notes or a mandatory reason) and the invariants are CHECK constraints (presence or
+credentials ⇒ `NOT_DELEGABLE`, etc.) in addition to API validation, so no code path or manual SQL can
+contradict them. Non-delegable tasks are deliberately listed so the product can say _why not_ and booking
+(Phase 2) can reject them. Slugs are immutable (stable URLs); a location's city, category and slug are
+immutable too (restrictions depend on its category); there is **no hard delete** — records are deactivated
+or archived, and foreign keys are `RESTRICT`. Location lifecycle is an explicit state machine
+(`PENDING_REVIEW→APPROVED|REJECTED`, `APPROVED→ARCHIVED`, `REJECTED→PENDING_REVIEW`, `ARCHIVED→APPROVED`;
+other moves 409). The public sees only `APPROVED` locations whose category **and** city are active
+(single definition in `publicLocationWhere`); everything else is indistinguishable from "does not exist".
+Provenance (who created/approved) lives in the audit log rather than extra columns; a `source` column
+(admin / business / community) will be added when business onboarding (Phase 5) and community submissions
+(Phase 4) need it.
+
+**D-034 Venue-specific restrictions are rows, and they can only tighten.** `LocationRestriction`
+(`PROHIBITED` / `REQUIRES_AUTHORIZATION` / `ADVISORY`, whole-venue or per task, unique per rule with
+`NULLS NOT DISTINCT`) is overlaid on a task by a pure, unit-tested function (`applyVenueRestrictions`):
+strictest wins and a venue can never loosen a task's own eligibility. The public location page shows the
+effective eligibility, the task's own one when stricter, and each venue note.
+
+**D-035 Seed policy: insert-only, real reference data only, no venues.** `pnpm --filter @qyou/api db:seed`
+inserts _missing_ cities (Kaduna, Abuja, Kano, Lagos — approximate centre coordinates), 7 categories and 25
+tasks with `ON CONFLICT DO NOTHING` in one transaction; it never updates, reactivates or deletes anything
+(administrator edits win), writes one `system.reference_data_seeded` audit event only when something changed,
+and **seeds no locations, assistants, reviews or wait times** (a unit test forbids business names and
+review/wait-time vocabulary in the seed data). The categories and task wording are a _proposal_ for owner
+review: they can be edited through the admin API without a deploy, and eligibility text is product policy,
+not legal advice about third-party rules (venues set their own, recorded per venue).
+
+**D-036 Public read behaviour: short success-only cache, literal search, capped pages.** Public reference
+reads send `Cache-Control: public, max-age=60, stale-while-revalidate=120` via an interceptor that sets it
+**only after success** — an e2e test caught that `@Header()` also stamps 404/400 responses, which a shared
+cache could then serve for a record that had just been approved. Search text escapes `%`, `_` and `\` (Prisma's
+`contains` does not; a test caught `q=%` matching everything). Lists are paginated (`pageSize` ≤ 50, stable
+`name, id` ordering); categories and cities are returned whole because they number in the dozens (documented,
+not paginated). `ILIKE` over a few hundred rows per city is fine; a trigram index is the upgrade path.
+
+**D-037 Discovery web UI: server-rendered, a plain GET search form, honest states.** Pages fetch the
+public API on the server (60 s revalidate) and degrade to explicit _unavailable_ / _empty_ states
+(never an exception, never a fake list); the search bar is a native `<form method="get" action="/search">`
+that works without JavaScript and produces shareable URLs; URL parameters are parsed defensively and invalid
+ones dropped. Copy states exactly what exists ("no locations added yet", "there are no assistants or bookings
+on Qyou yet"). No admin web UI yet: administration is API-only in M1.3 (see ROADMAP deferrals).
 
 ## Open (need input before the milestone that depends on them)
 

@@ -22,6 +22,15 @@
     "typescript/no-explicit-any": "error",
     "react/react-in-jsx-scope": "off",
     "typescript/no-extraneous-class": "off",
-    "import/no-unassigned-import": "off"
-  }
+    "import/no-unassigned-import": "off",
+    "eslint/no-underscore-dangle": "off"
+  },
+  "overrides": [
+    {
+      "files": ["**/*.spec.ts", "**/*.test.ts", "**/*.test.tsx", "**/*.e2e-spec.ts", "**/test/**"],
+      "rules": {
+        "unicorn/consistent-function-scoping": "off"
+      }
+    }
+  ]
 }
