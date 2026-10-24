@@ -80,7 +80,7 @@ export async function resetDatabase(_prisma?: PrismaService): Promise<void> {
   await owner.$transaction([
     owner.$executeRawUnsafe('ALTER TABLE audit_logs DISABLE TRIGGER USER'),
     owner.$executeRawUnsafe(
-      'TRUNCATE TABLE audit_logs, email_verification_tokens, password_reset_tokens, rate_limit_counters, sessions, location_restrictions, service_locations, eligible_tasks, service_categories, cities, users RESTART IDENTITY CASCADE',
+      'TRUNCATE TABLE audit_logs, email_verification_tokens, password_reset_tokens, rate_limit_counters, sessions, identity_checks, phone_verification_tokens, assistant_task_offers, assistant_service_areas, assistant_availability_windows, assistant_private_details, assistant_profiles, location_restrictions, service_locations, eligible_tasks, service_categories, cities, users RESTART IDENTITY CASCADE',
     ),
     owner.$executeRawUnsafe('ALTER TABLE audit_logs ENABLE TRIGGER USER'),
   ]);

@@ -20,8 +20,8 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         <footer className="border-t border-line bg-surface">
           <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-6 text-sm text-ink-muted sm:px-6">
             <p>
-              Qyou is in early development: places and rules are listed, assistants and booking are
-              not live yet.
+              Qyou is in early development: places, rules and verified assistants are listed,
+              booking is not live yet.
             </p>
             <Link href="/status" className="underline underline-offset-2">
               System status

@@ -110,7 +110,8 @@ export default async function HomePage() {
             </li>
             <li>
               <strong className="text-ink">Coming next:</strong> choosing an assistant and booking.
-              There are no assistants or bookings on Qyou yet.
+              Approved assistants can be browsed, but booking isn’t open, so there are no bookings
+              on Qyou yet.
             </li>
           </ul>
         </div>

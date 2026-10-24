@@ -36,6 +36,18 @@ const envSchema = z
     SMTP_USER: z.string().min(1).optional(),
     SMTP_PASS: z.string().min(1).optional(),
     MAIL_FROM: z.string().min(3).default('Qyou <no-reply@qyou.local>'),
+    /**
+     * Phone-verification transport. `dev` (non-production only) delivers the code as a clearly
+     * labelled simulated SMS email to Mailpit; `none` means no provider is configured, so the
+     * endpoints answer 503 and create no code. Defaults: dev outside production, none in production.
+     * A real provider needs an approved selection and explicit configuration (see DECISIONS D-038).
+     */
+    SMS_PROVIDER: z.enum(['dev', 'none']).optional(),
+    /** Secret key for HMAC-hashing phone codes. Required (≥ 32 chars) in production. */
+    PHONE_CODE_PEPPER: z
+      .string()
+      .min(32, 'PHONE_CODE_PEPPER must be at least 32 characters')
+      .optional(),
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV === 'production') {
@@ -53,6 +65,20 @@ const envSchema = z
           message: 'WEB_BASE_URL must be https in production',
         });
       }
+      if (!env.PHONE_CODE_PEPPER) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['PHONE_CODE_PEPPER'],
+          message: 'PHONE_CODE_PEPPER is required in production',
+        });
+      }
+      if (env.SMS_PROVIDER === 'dev') {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['SMS_PROVIDER'],
+          message: 'SMS_PROVIDER=dev simulates SMS and is not allowed in production',
+        });
+      }
       if (env.CORS_ORIGINS.some((origin) => !origin.startsWith('https://'))) {
         ctx.addIssue({
           code: 'custom',
@@ -61,7 +87,14 @@ const envSchema = z
         });
       }
     }
-  });
+  })
+  .transform((env) => ({
+    ...env,
+    SMS_PROVIDER:
+      env.SMS_PROVIDER ?? (env.NODE_ENV === 'production' ? ('none' as const) : ('dev' as const)),
+    // Non-production fallback so local setups work without configuration; it is not a secret.
+    PHONE_CODE_PEPPER: env.PHONE_CODE_PEPPER ?? 'dev-only-pepper-not-a-secret-0000000000',
+  }));
 
 export type Env = z.infer<typeof envSchema>;
 

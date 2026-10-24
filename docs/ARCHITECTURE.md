@@ -319,13 +319,128 @@ exactly once and failed writes never; atomic audit (a failing audit rolls the wr
 duplicates → exactly one winner); CHECK constraints and `NULLS NOT DISTINCT` exercised with raw SQL as the owner;
 `RESTRICT` foreign keys; seed idempotence, non-destructiveness and partial-state repair.
 
+### Assistants: profiles, onboarding and verification (M1.4 — implemented)
+
+An assistant is a user with an `AssistantProfile`. The **role invariant** is: a user has role `ASSISTANT`
+**if and only if** their application is `APPROVED`. The role is granted/revoked only by the existing role
+service (`AdminUsersService`), inside the same transaction as the status change — a complete profile, a
+verified phone or a passed identity check never grants anything by themselves.
+
+```
+User 1──0..1 AssistantProfile 1──1 AssistantPrivateDetails   (legal name, phone — PRIVATE)
+                    │  1──* AssistantServiceArea ──* City
+                    │  1──* AssistantTaskOffer ──* EligibleTask      (never NOT_DELEGABLE; trigger-enforced)
+                    │  1──* AssistantAvailabilityWindow              (a declaration, not a guarantee)
+                    │  1──* IdentityCheck                            (outcomes only — never documents)
+                    └  1──* PhoneVerificationToken                   (HMAC of a 6-digit code)
+```
+
+**Public vs private.** `AssistantProfile` holds only intentionally public fields (display name, slug, bio,
+languages, status). Everything private lives in `AssistantPrivateDetails` (legal name, phone) and is returned
+only to the owner and to administrators reviewing the application (phone masked in lists; every admin read of
+the private fields is audited). Public endpoints select from an explicit allow-list of fields and never join
+the private table, the user's email, or the user id.
+
+**Application state machine** (`ApplicationStatus`; anything else is 409):
+
+| From                | To                               | Who       | Requirements                                                                                                                  |
+| ------------------- | -------------------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `DRAFT`             | `SUBMITTED`                      | assistant | email verified; basics, ≥1 city, ≥1 task, ≥1 availability window, legal name + phone present                                  |
+| `CHANGES_REQUESTED` | `SUBMITTED`                      | assistant | same as above                                                                                                                 |
+| `SUBMITTED`         | `UNDER_REVIEW`                   | admin     | —                                                                                                                             |
+| `UNDER_REVIEW`      | `CHANGES_REQUESTED` / `REJECTED` | admin     | reason ≥ 10 chars                                                                                                             |
+| `UNDER_REVIEW`      | `APPROVED`                       | admin     | reason; email verified; **phone verified; latest identity outcome `PASSED`**; profile complete; grants `ASSISTANT` atomically |
+| `REJECTED`          | `UNDER_REVIEW`                   | admin     | reason (reconsideration)                                                                                                      |
+| `APPROVED`          | `SUSPENDED`                      | admin     | reason; revokes `ASSISTANT` atomically                                                                                        |
+| `SUSPENDED`         | `APPROVED`                       | admin     | reason; all approval requirements re-checked; re-grants role                                                                  |
+| `SUSPENDED`         | `REJECTED`                       | admin     | reason                                                                                                                        |
+
+An admin can never act on their own application. Editing: `DRAFT`/`CHANGES_REQUESTED` everything; `APPROVED`
+bio, languages, availability, service areas and offers (display name and legal name locked; changing the phone
+clears its verification and makes the assistant ineligible until re-verified); `SUBMITTED`, `UNDER_REVIEW`,
+`REJECTED`, `SUSPENDED` read-only (409), so a review cannot race with edits.
+
+**Eligibility for paid work** (`AssistantEligibilityService`, the only definition, also a global
+`@RequireAssistantEligibility()` guard for future "accept job" routes): user `ACTIVE` ∧ role `ASSISTANT` ∧
+email verified ∧ application `APPROVED` ∧ phone verified ∧ latest identity outcome `PASSED` ∧ ≥1 area ∧ ≥1
+offered task. Each failed condition is reported as a reason. A venue-level check (`canServeTask`) reuses
+`applyVenueRestrictions`, so a task that is non-delegable _at a venue_ cannot be accepted there.
+
+**Task offers cannot contradict policy.** The API rejects non-delegable or inactive tasks, tasks of inactive
+categories and inactive cities; a database trigger independently refuses to insert a `NOT_DELEGABLE` task
+into `assistant_task_offers`. If an administrator later makes an offered task non-delegable, public views and
+eligibility checks ignore the offer at read time (no stale advertising).
+
+**Identity verification — no provider is configured, so this is an honest manual workflow.** Qyou stores
+_outcomes only_: `IdentityCheck(result PASSED|FAILED|INCONCLUSIVE, method MANUAL_REVIEW, evidenceRef, notes,
+checkedBy, checkedAt)`. Documents, selfies and ID numbers are **never** uploaded to or stored in PostgreSQL
+or the application (no storage exists). The reviewer performs the check out-of-band (e.g. a recorded video
+call or in-person check run by Qyou staff under a documented procedure) and records the result plus an opaque
+`evidenceRef` pointing to where the evidence is held. The API rejects `notes`/`evidenceRef` that look like
+identifiers (≥ 9 consecutive digits ⇒ NIN/BVN/card/phone-like). The UI labels the outcome "Manual review"; it
+never says "verified by a provider". Limitations: there is no automated liveness/document authentication, the
+quality of the check depends on the human procedure, and `evidenceRef` is only as trustworthy as the
+off-system store it points to.
+
+**Phone verification.** `SmsService` is an interface. `SMS_PROVIDER=dev` (non-production only) delivers the
+"SMS" as an email to Mailpit, clearly labelled as simulated; `SMS_PROVIDER=none` (the production default)
+makes the endpoints answer **503 and create no code** — it never pretends to have sent anything. Codes are 6
+digits from a CSPRNG, expire in 10 minutes, are single-use, limited to 5 attempts, and stored only as
+`HMAC-SHA256(pepper, tokenId|phone|code)` (a plain hash of a 10⁶ space is reversible). Rate limits: 60 s cooldown,
+5 sends/hour per user, 3/hour per phone number, 20/hour per IP; 10 verify attempts / 15 min per user. A verified
+phone can belong to only one assistant (partial unique index). Only Nigerian numbers (`+234` + 10 digits) are
+accepted at launch. Per-IP caps sit on top: 20 code requests/hour, 30 verification attempts/15 min, 10 applications started/hour.
+
+**Admin workflow.** `GET /admin/assistants` (status filter, paginated, phone masked), `GET /admin/assistants/:id`
+(private details visible, audited), `POST …/identity-checks`, `POST …/transitions {to, reason}`; web pages
+`/admin/assistants` and `/admin/assistants/[id]`. Every decision stores the reason (shown to the assistant) and
+an audit row (`admin.assistant.<status>`; `admin.assistant.identity_check_recorded`;
+`admin.assistant.private_viewed`).
+
+**API surface (all under `/api/v1`).**
+
+| Endpoint                                                                        | Access                          | Purpose                                                                   |
+| ------------------------------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------- |
+| `GET /assistants`, `GET /assistants/:slug`                                      | public, 60 s success-only cache | Eligible assistants only; allow-listed public fields                      |
+| `GET /assistants/me`, `GET /assistants/me/eligibility`                          | session, verified email         | Dashboard, checklist, status + reason, eligibility reasons                |
+| `POST /assistants/me`                                                           | session, verified email         | Start an application (draft)                                              |
+| `PATCH /assistants/me`, `PUT …/services`, `PUT …/availability`, `PUT …/private` | owner, edit scope permitting    | Public profile, offered tasks + cities, preferred times, legal name/phone |
+| `POST …/phone/code`, `POST …/phone/verify`                                      | owner                           | Phone ownership (D-040)                                                   |
+| `POST …/submit`                                                                 | owner                           | DRAFT/CHANGES_REQUESTED → SUBMITTED                                       |
+| `GET /admin/assistants`, `GET /admin/assistants/:id`                            | `@AdminOnly`                    | Queue (masked phone); detail (audited private read)                       |
+| `POST /admin/assistants/:id/identity-checks`, `…/transitions`                   | `@AdminOnly`, CSRF              | Record outcome; decisions with reasons                                    |
+
+There is deliberately **no endpoint that grants `ASSISTANT` outside `…/transitions`**, and no endpoint accepts a
+status or role in a request body (strict schemas reject unknown keys; covered by tests).
+
+**Security assumptions (M1.4).** (1) A compromised administrator account can approve anyone: approval is
+audited and requires a verified-email admin, but there is no dual control yet. (2) The manual identity review is
+only as good as the human procedure and the off-system evidence store; Qyou cannot detect forged documents.
+(3) SMS OTP proves control of a number at one moment, not identity; SIM-swap/number-recycling are unmitigated.
+(4) Private details are protected by access control + audit, not encryption at rest. (5) The `DevSmsService`
+output in Mailpit is a development convenience and is not evidence that any SMS was delivered; production
+refuses to start with `SMS_PROVIDER=dev` and returns 503 with `none`.
+
+**Tests.** Unit: state machine, eligibility decision, availability validation, phone normalisation/masking,
+code hashing, identifier tripwire, SMS services, env validation, guard order. E2E (real PostgreSQL, runtime
+role): onboarding (public/private split, edit scopes, validation, non-delegable rejection, trigger),
+phone (expiry, single use, attempts, cooldown and rate limits, uniqueness, fail-closed provider), admin (every
+endpoint × every role, transitions incl. invalid ones, blockers, role granted/revoked atomically, audit rows,
+self-review forbidden, no role-granting by any other route), public (allow-list, hidden when not
+eligible), eligibility (suspended/unapproved/unverified, venue restrictions).
+
+**Known limitations (documented, not hidden):** legal name and phone are stored unencrypted in a separate
+table (column-level encryption / KMS is Phase 6); no profile photo (no storage); post-approval edits to bio go
+live without moderation; the same admin may record an identity check and approve (dual control is recommended
+and recorded as a launch gate); retention/deletion of private details after rejection is not yet automated.
+
 ## Planned backend modules (design intent)
 
 `auth · users · assistants · verification · service-categories · service-locations ·
 service-requests · matching · bookings · tracking · messaging · payments · reviews · disputes ·
 notifications · favorites · wait-reports · virtual-queues · businesses · admin`
 
-Implemented so far: `auth`, `authz`, `admin`, `service-categories`, `service-locations`, `seed` (with
+Implemented so far: `auth`, `authz`, `admin`, `assistants` (profiles, onboarding, phone + identity verification workflow), `service-categories`, `service-locations`, `seed` (with
 `audit`, `mail`, rate limiting as shared infrastructure) and `health`. Rules: one module per cohesive responsibility, not per noun; modules depend on each other through
 exported services only; no circular dependencies; business rules live in domain services (not
 controllers); create modules when their phase starts, not before. `rewards` (Stellar) is
@@ -383,8 +498,7 @@ idempotency keys.
   signature-verified and idempotent; reconcile states, never trust the frontend success page.
 - Location: minimal necessary; no background tracking without an explicit user-controlled
   permission; share assistant location with the customer only during an active booking.
-- Personal data: collect the minimum; verification documents stored encrypted with restricted
-  access (design in M1.4).
+- Personal data: collect the minimum; verification **documents are not stored at all** (D-039); legal name/phone are access-controlled and audited but not yet encrypted at rest (D-043).
 - Web headers (implemented on API): Helmet defaults; CORS limited to `CORS_ORIGINS`.
 
 ## Payments (design intent)

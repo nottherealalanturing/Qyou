@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_FILTER, APP_PIPE } from '@nestjs/core';
 import { GLOBAL_GUARDS } from './app.guards.js';
+import { AssistantsModule } from './assistants/assistants.module.js';
 import { AdminModule } from './admin/admin.module.js';
 import { AuditModule } from './audit/audit.module.js';
 import { AuthModule } from './auth/auth.module.js';
@@ -27,6 +28,7 @@ import { PrismaModule } from './prisma/prisma.module.js';
     AdminModule,
     ServiceCategoriesModule,
     ServiceLocationsModule,
+    AssistantsModule,
     SeedModule,
     HealthModule,
   ],

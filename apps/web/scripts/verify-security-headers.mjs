@@ -6,6 +6,7 @@ const base = (process.argv[2] ?? 'http://localhost:3000').replace(/\/+$/, '');
 const pages = [
   '/',
   '/search',
+  '/assistants',
   '/login',
   '/register',
   '/forgot-password',

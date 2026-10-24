@@ -92,6 +92,35 @@ export default async function AccountPage() {
         )}
       </section>
 
+      <section aria-labelledby="assistant-heading" className={`mt-6 ${card}`}>
+        <h2 id="assistant-heading" className="text-lg font-semibold">
+          Work as an assistant
+        </h2>
+        <p className="mt-1 text-ink-muted">
+          Hold places in line for others. Applications are reviewed by the Qyou team.
+        </p>
+        <p className="mt-4">
+          <Link
+            href="/assistant"
+            className="font-semibold text-brand-700 underline underline-offset-2"
+          >
+            {user.role === 'ASSISTANT'
+              ? 'Open my assistant dashboard'
+              : 'Start or continue my application'}
+          </Link>
+          {user.role === 'ADMIN' ? (
+            <span className="ml-4">
+              <Link
+                href="/admin/assistants"
+                className="font-semibold text-brand-700 underline underline-offset-2"
+              >
+                Review applications
+              </Link>
+            </span>
+          ) : null}
+        </p>
+      </section>
+
       <section aria-labelledby="password-heading" className={`mt-6 ${card}`}>
         <h2 id="password-heading" className="text-lg font-semibold">
           Change password

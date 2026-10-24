@@ -25,6 +25,8 @@ export default defineConfig({
       CORS_ORIGINS: 'http://localhost:3000',
       WEB_BASE_URL: 'http://localhost:3000',
       TRUST_PROXY: '0',
+      SMS_PROVIDER: 'dev',
+      PHONE_CODE_PEPPER: 'e2e-only-pepper-0123456789abcdef0123456789',
     },
   },
 });

@@ -6,15 +6,17 @@ export function Pagination({
   page,
   totalPages,
   params,
+  basePath = '/search',
 }: {
   page: number;
   totalPages: number;
   params: SearchParams;
+  basePath?: string;
 }) {
   if (totalPages <= 1) return null;
   const href = (target: number) => {
     const query = searchQueryString({ ...params, page: target });
-    return query ? `/search?${query}` : '/search';
+    return query ? `${basePath}?${query}` : basePath;
   };
   const base =
     'inline-flex h-10 items-center rounded-xl border border-ink/25 px-4 text-sm font-semibold hover:border-ink';

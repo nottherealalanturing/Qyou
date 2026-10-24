@@ -42,6 +42,8 @@ model User {
   sessions                Session[]
   passwordResetTokens     PasswordResetToken[]
   emailVerificationTokens EmailVerificationToken[]
+  assistantProfile        AssistantProfile?
+  identityChecksRecorded  IdentityCheck[]
 
   @@map("users")
 }
@@ -176,7 +178,8 @@ model City {
   createdAt DateTime @default(now()) @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @db.Timestamptz(3)
 
-  locations ServiceLocation[]
+  locations      ServiceLocation[]
+  assistantAreas AssistantServiceArea[]
 
   @@unique([state, name])
   @@index([isActive, sortOrder])
@@ -224,8 +227,9 @@ model EligibleTask {
   createdAt                DateTime        @default(now()) @db.Timestamptz(3)
   updatedAt                DateTime        @updatedAt @db.Timestamptz(3)
 
-  category     ServiceCategory       @relation(fields: [categoryId], references: [id], onDelete: Restrict)
-  restrictions LocationRestriction[]
+  category        ServiceCategory       @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  restrictions    LocationRestriction[]
+  assistantOffers AssistantTaskOffer[]
 
   @@unique([categoryId, slug])
   @@unique([categoryId, nameKey])
@@ -273,4 +277,163 @@ model LocationRestriction {
   @@unique([locationId, taskId, rule])
   @@index([locationId])
   @@map("location_restrictions")
+}
+
+// ───────────────────── Assistants (M1.4) ─────────────────────
+// Public profile data, private details and verification outcomes live in SEPARATE tables.
+// Raw identity documents are never stored here (no storage exists; outcomes only).
+// See docs/ARCHITECTURE.md "Assistants: profiles, onboarding and verification".
+
+enum ApplicationStatus {
+  DRAFT
+  SUBMITTED
+  UNDER_REVIEW
+  CHANGES_REQUESTED
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+/// PENDING means "no outcome recorded yet"; recorded checks are PASSED, FAILED or INCONCLUSIVE.
+enum IdentityOutcome {
+  PENDING
+  PASSED
+  FAILED
+  INCONCLUSIVE
+}
+
+enum IdentityMethod {
+  MANUAL_REVIEW
+}
+
+/// Intentionally public marketplace information plus the application workflow state.
+model AssistantProfile {
+  id               String            @id @default(uuid(7)) @db.Uuid
+  userId           String            @unique @db.Uuid
+  /// Public URL handle: name + random suffix. Immutable.
+  slug             String            @unique @db.VarChar(80)
+  displayName      String            @db.VarChar(60)
+  bio              String            @default("") @db.VarChar(600)
+  /// Spoken languages, from a fixed list validated by the API.
+  languages        String[]          @default([])
+  /// Short free text shown with the declared availability.
+  availabilityNote String?           @db.VarChar(200)
+  timezone         String            @default("Africa/Lagos") @db.VarChar(40)
+  status           ApplicationStatus @default(DRAFT)
+  /// The latest reason given by an administrator (shown to the assistant, never public).
+  statusReason     String?           @db.VarChar(500)
+  statusChangedAt  DateTime          @default(now()) @db.Timestamptz(3)
+  submittedAt      DateTime?         @db.Timestamptz(3)
+  approvedAt       DateTime?         @db.Timestamptz(3)
+  /// Denormalised latest identity-check outcome (history is in identity_checks).
+  identityOutcome  IdentityOutcome   @default(PENDING)
+  createdAt        DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime          @updatedAt @db.Timestamptz(3)
+
+  user           User                          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  privateDetails AssistantPrivateDetails?
+  serviceAreas   AssistantServiceArea[]
+  taskOffers     AssistantTaskOffer[]
+  availability   AssistantAvailabilityWindow[]
+  identityChecks IdentityCheck[]
+  phoneTokens    PhoneVerificationToken[]
+
+  @@index([status, createdAt])
+  @@index([status, identityOutcome])
+  @@map("assistant_profiles")
+}
+
+/// PRIVATE: returned only to the owner and to reviewing administrators. Never joined by public queries.
+model AssistantPrivateDetails {
+  id              String    @id @default(uuid(7)) @db.Uuid
+  profileId       String    @unique @db.Uuid
+  legalName       String?   @db.VarChar(120)
+  /// E.164, Nigerian numbers only at launch (+234 and 10 digits).
+  phoneE164       String?   @db.VarChar(16)
+  phoneVerifiedAt DateTime? @db.Timestamptz(3)
+  createdAt       DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime  @updatedAt @db.Timestamptz(3)
+
+  profile AssistantProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  // A partial unique index (verified phones only) is added by hand in the migration.
+  @@map("assistant_private_details")
+}
+
+model AssistantServiceArea {
+  profileId String @db.Uuid
+  cityId    String @db.Uuid
+
+  profile AssistantProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  city    City             @relation(fields: [cityId], references: [id], onDelete: Restrict)
+
+  @@id([profileId, cityId])
+  @@index([cityId])
+  @@map("assistant_service_areas")
+}
+
+/// A task the assistant offers. A trigger refuses NOT_DELEGABLE tasks (see migration).
+model AssistantTaskOffer {
+  profileId String @db.Uuid
+  taskId    String @db.Uuid
+
+  profile AssistantProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  task    EligibleTask     @relation(fields: [taskId], references: [id], onDelete: Restrict)
+
+  @@id([profileId, taskId])
+  @@index([taskId])
+  @@map("assistant_task_offers")
+}
+
+/// Preferred working window — a declaration, NOT a guarantee that work is available.
+model AssistantAvailabilityWindow {
+  id          String @id @default(uuid(7)) @db.Uuid
+  profileId   String @db.Uuid
+  /// 0 = Sunday … 6 = Saturday.
+  dayOfWeek   Int
+  /// Minutes from local midnight, 0..1440; start < end.
+  startMinute Int
+  endMinute   Int
+
+  profile AssistantProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([profileId, dayOfWeek])
+  @@map("assistant_availability_windows")
+}
+
+/// One phone-verification attempt. The 6-digit code is stored only as an HMAC.
+model PhoneVerificationToken {
+  id        String    @id @default(uuid(7)) @db.Uuid
+  profileId String    @db.Uuid
+  phoneE164 String    @db.VarChar(16)
+  codeHash  String    @db.Char(64)
+  attempts  Int       @default(0)
+  expiresAt DateTime  @db.Timestamptz(3)
+  usedAt    DateTime? @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+
+  profile AssistantProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([profileId, createdAt])
+  @@index([expiresAt])
+  @@map("phone_verification_tokens")
+}
+
+/// An identity-check OUTCOME recorded by an administrator. No documents, selfies or ID numbers are
+/// stored; `evidenceRef` is an opaque pointer to wherever the reviewer's evidence is held off-system.
+model IdentityCheck {
+  id              String          @id @default(uuid(7)) @db.Uuid
+  profileId       String          @db.Uuid
+  result          IdentityOutcome
+  method          IdentityMethod  @default(MANUAL_REVIEW)
+  evidenceRef     String?         @db.VarChar(120)
+  notes           String?         @db.VarChar(500)
+  checkedByUserId String          @db.Uuid
+  createdAt       DateTime        @default(now()) @db.Timestamptz(3)
+
+  profile   AssistantProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  checkedBy User             @relation(fields: [checkedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([profileId, createdAt])
+  @@map("identity_checks")
 }

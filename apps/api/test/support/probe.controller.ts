@@ -1,4 +1,5 @@
 import { Controller, Get } from '@nestjs/common';
+import { RequireAssistantEligibility } from '../../src/assistants/eligibility.guard.js';
 import { Public } from '../../src/auth/public.decorator.js';
 import { Roles } from '../../src/authz/roles.decorator.js';
 import { RequireVerifiedEmail } from '../../src/authz/verified-email.decorator.js';
@@ -43,6 +44,21 @@ export class ProbeController {
   @Roles('ASSISTANT')
   @RequireVerifiedEmail()
   assistantVerified() {
+    return { ok: true };
+  }
+
+  /** Paid assistant work: role AND full eligibility are required. */
+  @Get('paid-job')
+  @Roles('ASSISTANT')
+  @RequireAssistantEligibility()
+  paidJob() {
+    return { ok: true };
+  }
+
+  /** Eligibility alone (no @Roles): the guard itself must refuse anyone who is not fully eligible. */
+  @Get('paid-job-guard-only')
+  @RequireAssistantEligibility()
+  paidJobGuardOnly() {
     return { ok: true };
   }
 

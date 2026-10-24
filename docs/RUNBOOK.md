@@ -176,6 +176,8 @@ administrator is locked out of their mailbox, a database operator must intervene
 | `SMTP_SECURE`             | `false`                          | `true` for implicit TLS (port 465)                                                                                                                                                           |
 | `SMTP_USER/PASS`          | _(none)_                         | Optional SMTP auth                                                                                                                                                                           |
 | `MAIL_FROM`               | `Qyou <no-reply@qyou.local>`     |                                                                                                                                                                                              |
+| `SMS_PROVIDER`            | `dev` (non-prod) / `none` (prod) | `dev` emails the "SMS" to Mailpit labelled SIMULATED; **refused in production**. `none` ⇒ phone verification answers 503 (no code created). No real provider exists yet (D-038)              |
+| `PHONE_CODE_PEPPER`       | dev-only constant                | HMAC key for phone codes; **required in production**, ≥ 32 random characters; rotating it invalidates outstanding codes (they last 10 min)                                                   |
 | `TEST_DATABASE_URL`       | local `qyou_test` (runtime role) | Used only by `test:e2e`                                                                                                                                                                      |
 | `TEST_ADMIN_DATABASE_URL` | local `qyou_test` (owner role)   | Used by `db:deploy:test` and e2e setup (truncation, DB-level assertions)                                                                                                                     |
 
@@ -189,6 +191,31 @@ Web: `API_BASE_URL` (default `http://localhost:4000/api/v1`) — used for the `/
 
 Production notes: terminate TLS in front of both apps; set `TRUST_PROXY` to the real hop count;
 rate limits are PostgreSQL-backed and safe across instances (D-017); SMTP must be a real provider; set `FORCE_HTTPS=true` on the web app; use a non-superuser DB owner and keep its URL out of the API environment.
+
+## Assistant applications: review workflow and local testing
+
+Roles: only an **administrator** (verified email) can review. Nobody can review their own application.
+
+1. Applicant registers, verifies email, opens `/assistant`, starts an application, completes the profile,
+   offered tasks, preferred times and private details (legal name, mobile), verifies the mobile
+   with the code, and submits.
+2. **Local SMS:** with `SMS_PROVIDER=dev` the code is emailed to Mailpit (http://localhost:8052) with a
+   "SIMULATED — no SMS was sent" banner. In production there is no delivery path until a provider is approved
+   (D-038): the endpoints return 503 and applicants cannot complete phone verification — plan for that
+   before opening applications.
+3. Admin opens `/admin/assistants`, opens the application (this read is audited), performs the identity check
+   **outside Qyou** under your documented procedure, then records only the outcome (Passed / Failed /
+   Inconclusive) and an opaque reference. Never paste ID numbers, photos or documents; digit runs of 9+ are
+   rejected as a tripwire, not a guarantee.
+4. Admin decides (reason of 10+ characters, shown to the applicant): request changes, reject, or approve.
+   Approval is refused with a list of blockers unless email + phone are verified, the latest identity outcome is
+   Passed, and the profile is complete. Approval grants the `ASSISTANT` role in the same transaction; suspension
+   or rejection removes it and hides the public profile immediately (≤ 60 s cache).
+5. Evidence: audit rows `admin.assistant.*`, `admin.role_changed`, `assistant.*` in `audit_logs`.
+
+Local reset of assistant test data (owner role; audit rows are append-only, so triggers must be disabled — dev only):
+`ALTER TABLE audit_logs DISABLE TRIGGER USER; DELETE FROM … ; ALTER TABLE audit_logs ENABLE TRIGGER USER;`
+Never do this against any shared or production database.
 
 ## Troubleshooting
 
@@ -236,3 +263,12 @@ rate limits are PostgreSQL-backed and safe across instances (D-017); SMTP must b
   `REJECTED→PENDING_REVIEW`, `ARCHIVED→APPROVED` are allowed.
 - **Home page shows "We couldn't load the categories"** — the web app can't reach the API (`API_BASE_URL`) or the
   API/DB is down; run `pnpm db:seed` if the API is up but categories are empty.
+- **Phone code request returns 503 "unavailable"** — `SMS_PROVIDER=none` (production default). Use `dev` locally;
+  production needs an approved provider (D-038).
+- **API refuses to start: `SMS_PROVIDER=dev … not allowed in production` / `PHONE_CODE_PEPPER is required`** — set
+  `SMS_PROVIDER=none` (or the future provider) and a random ≥ 32-character pepper.
+- **Approve returns 409 with blockers** — read the listed requirements (phone, identity outcome, completeness);
+  there is no override by design.
+- **Applicant cannot edit their application** — it is locked while submitted/under review/rejected/suspended; after
+  approval only non-identity fields are editable (D-042).
+- **403 "You cannot review your own application"** — another administrator must review it.

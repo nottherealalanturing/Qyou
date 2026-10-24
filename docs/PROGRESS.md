@@ -1,130 +1,119 @@
 # Qyou — Progress
 
-_Last updated: 2026-10-23 (end of M1.3 session)._ The code is authoritative; if this file looks
+_Last updated: 2026-10-24 (end of M1.4 session)._ The code is authoritative; if this file looks
 stale, verify against the repository and reconcile.
 
 ## Current state
 
-**Phase 0, M1.1, M1.2 and M1.3 complete.** Commits: `5f4699d` (Phase 0 + M1.1), `c7979ed` (M1.2).
-**All M1.3 work is uncommitted in the working tree** (commits/pushes need explicit authorisation);
-nothing tracked was deleted. No tracked file contains secrets; `.env` files remain git-ignored.
+**Phase 0, M1.1, M1.2, M1.3 and M1.4 complete.** Commits: `5f4699d` (Phase 0 + M1.1), `c7979ed` (M1.2),
+`b7947b5` (M1.3). **All M1.4 work is uncommitted in the working tree** (commits/pushes need explicit
+authorisation); nothing tracked was deleted. No tracked file contains secrets; `.env` files remain git-ignored.
 
-## Completed in M1.3 — reference data and discovery
+## Completed in M1.4 — assistant profiles, onboarding and verification
 
-- **Schema documented first** (ARCHITECTURE → "Reference data model"), then migration
-  `20261023223410_reference_data`: `cities`, `service_categories`, `eligible_tasks`,
-  `service_locations`, `location_restrictions` + enums. Hand-written, database-enforced invariants:
-  task presence/credentials ⇒ `NOT_DELEGABLE`; `REQUIRES_AUTHORIZATION` needs notes; `NOT_DELEGABLE`
-  needs a reason; slug formats; coordinate ranges/pairs; non-blank notes; unique restriction per rule
-  with `NULLS NOT DISTINCT`. Foreign keys are `RESTRICT` (no cascading loss). No new grants needed
-  (default privileges from M1.2 gave the runtime role DML; verified).
-- **Cities are not venues**: four launch cities exist with **zero** venues; nothing is invented.
-- **Public API** (`@Public`, 60 s success-only cache): categories, category detail with tasks, cities,
-  paginated/filterable locations (city, category, search), location detail with per-venue effective
-  eligibility.
-- **Admin API** (`@AdminOnly`, CSRF, audited in the same transaction): categories, tasks, cities, locations
-  (explicit status state machine), venue restrictions. Slugs and a location's city/category are immutable;
-  no hard delete; no-op PATCH writes and audits nothing.
-- **Seed** (`pnpm --filter @qyou/api db:seed`): 4 cities (Kaduna, Abuja, Kano, Lagos), 7 categories, 25
-  tasks (including explicitly non-delegable ones with reasons); insert-only, idempotent, no venues.
-- **Web discovery**: `/`, `/search`, `/categories/[slug]`, `/locations/[slug]`, 404 page, footer; Airbnb-style
-  cards, native GET search form, grouped eligibility, honest empty/unavailable states, mobile header fix.
-- **Registration decision recorded**: enumeration-safe registration is a **launch requirement** (D-021),
-  scheduled as **M1.8** and listed under ROADMAP "Launch gates". Authentication behaviour was **not changed**.
-- **Docs**: ARCHITECTURE (model, API surface, web, tests), DECISIONS (D-007/D-021 revised, D-033…D-037),
-  ROADMAP (M1.3 ✅, M1.8, launch gates, deferrals), PRODUCT (launch requirements), RUNBOOK (seed, admin API
-  usage, troubleshooting).
+- **Design first** (ARCHITECTURE → "Assistants"), then migration `20261024073316_assistants`: `assistant_profiles`,
+  `assistant_private_details`, `assistant_service_areas`, `assistant_task_offers`,
+  `assistant_availability_windows`, `phone_verification_tokens`, `identity_checks` + enums; hand-written CHECKs,
+  a partial unique index (one verified phone per number) and a trigger refusing `NOT_DELEGABLE` task offers.
+- **Public/private split**: legal name and phone live in a separate table no public query selects; public
+  output is an allow-list (recursive key-scan test); admin reads of private fields are audited.
+- **State machine** (draft → submitted → under review → approved / rejected / changes requested; suspension)
+  with reasons, edit locks, and audit rows in the same transaction (D-042).
+- **Role invariant** (D-041): `ASSISTANT` ⇔ `APPROVED`, granted/revoked only through
+  `AdminUsersService.assignRoleInTransaction` in the approval transaction. No other route grants it.
+- **Phone verification** behind an `SmsService` interface (D-040): simulated via Mailpit in development,
+  **fails closed (503, no code created)** in production; HMAC'd codes, expiry, single use, attempt caps, cooldown,
+  per-user/number/IP limits, unique verified numbers.
+- **Identity**: _manual review, outcomes only_ (D-038, D-039). No provider, no documents, no ID numbers stored.
+- **Eligibility** (D-044): one definition + global guard for future paid-work routes; reuses venue restrictions.
+- **Web**: `/assistant` dashboard (checklist, forms, phone verification, submit, status/reason),
+  `/assistants` directory and `/assistants/[slug]` profile (public fields only), `/admin/assistants` queue and
+  review page. Footer/home copy updated to say assistants are listed but booking is not live.
+- **Docs**: ARCHITECTURE, DECISIONS (D-038…D-044), ROADMAP, PRODUCT (verification policy), RUNBOOK (env vars,
+  review workflow, troubleshooting), `.env.example`.
 
 ## Latest checks
 
-**Baseline before any change** (commit `c7979ed`, clean tree): `pnpm check` exit 0 — 33 API unit, 176 API
-e2e, 53 web tests.
+**Baseline before any change** (commit `b7947b5`, clean tree): API unit 57, API e2e 276, web 79.
 
-**After M1.3** (2026-10-23, from a clean state: `node_modules`, generated client, `dist`, `.next` deleted;
-`pnpm install --frozen-lockfile`; `pnpm db:roles`; `pnpm db:deploy:test`; then `pnpm check`):
+**After M1.4** (2026-10-24, from a clean state: `node_modules`, generated client, `dist`, `.next`, tsbuildinfo
+deleted; `pnpm install --frozen-lockfile`; `pnpm db:roles`; `pnpm db:deploy:test`; then `pnpm check`):
 
 | Check                                                         | Result                |
 | ------------------------------------------------------------- | --------------------- |
 | `pnpm check` (format, lint, typecheck, test, test:e2e, build) | **exit 0**            |
-| API unit tests (Vitest)                                       | 57 passed (12 files)  |
-| API e2e on real PostgreSQL `qyou_test`, runtime role          | 276 passed (14 files) |
-| Web unit + component/rendering tests                          | 79 passed (12 files)  |
+| API unit tests (Vitest)                                       | 137 passed (19 files) |
+| API e2e on real PostgreSQL `qyou_test`, runtime role          | 451 passed (19 files) |
+| Web unit + component/rendering tests                          | 105 passed (14 files) |
 | `pnpm lint` (`--deny-warnings`)                               | clean                 |
+| `pnpm verify:headers` on a production build                   | passed, 8 pages       |
 
-New e2e (100 tests): `reference-data-public` (28), `reference-data-admin` (56), `reference-data-integrity`
-(16). They cover public reads and visibility (inactive/pending/rejected/archived/hidden-by-parent all 404
-like unknown), filters, literal `%`/`_` search, stable pagination and validation limits, cache headers on
-success only; **every admin endpoint** against anonymous, customer/assistant/business, unverified-admin and
-cross-origin callers; admin writes, validation, duplicates (409), merged-state delegation rules, the status
-state machine, restrictions (incl. venue-wide duplicates); audit exactly once per successful write and never
-for failures, plus atomicity (a failing audit rolls the write back); concurrency (racing duplicates → one
-winner); CHECK constraints and `RESTRICT` exercised with raw SQL; seed idempotence, non-destructiveness and
-partial-state repair.
+New e2e (175): onboarding 55, phone 26, admin 44, public 21, eligibility 29.
 
 Runtime verification beyond the suites (actually performed):
 
-- **Migrations on a clean database**: all 5 applied to a brand-new throwaway Postgres (roles created first
-  from `docker/dev-db-roles.sql`, as infra would): all 11 tables present, 4 CHECKs on `eligible_tasks`,
-  `NULLS NOT DISTINCT` index, runtime role has DML on the new tables, `audit_logs` still insert-only, and a
-  task with `requiresCredentials=true, ELIGIBLE` was **rejected by the database**; re-deploy idempotent.
-  On the existing databases: dev (`migrate dev`, "in sync") and the long-lived `qyou_test` (`deploy`).
-- **Seed CLI** run for real against the dev DB twice (created 4/7/25, then 0/0/0) and against the clean DB as
-  the runtime role.
-- **Browser, production build + API + dev DB**: home (hero, search, 7 category cards "no locations yet", 4
-  cities "No locations added yet", "what's live today"), category page (tasks grouped Available / Needs
-  authorization with what to provide / Not available with why), search empty state, then — after adding
-  **clearly-labelled QA venues via the real admin API** — 13 venues in Kaduna with cards, page 2, a search
-  typed into the form (`venue 07` → 1 result, empty city/type params ignored), a venue page whose venue rule
-  moved a task from _Available_ to _Needs authorization_, and the mobile layout (which exposed and then
-  verified a header-wrapping fix). **All QA data was then deleted** from the dev DB (0 users/venues remain;
-  seeded reference data kept; audit triggers re-enabled).
-- `pnpm verify:headers` passes for all 7 pages (now including `/search`) of the production build.
+- **Migrations on a clean database**: all 6 applied to a brand-new throwaway Postgres 17 (roles first, from
+  `docker/dev-db-roles.sql`); `prisma migrate diff` reports no drift; 13 CHECKs on the new tables, the trigger and
+  the partial unique index exist, runtime role has DML on the new tables and still **cannot UPDATE/DELETE
+  `audit_logs`**. Container removed afterwards.
+- **Browser, production build + API + dev DB + Mailpit**: applicant registered, verified email from Mailpit,
+  started an application, completed profile/tasks/times/private details, verified a phone with the simulated
+  code from Mailpit, submitted; admin opened the application (audited), started review, **approval was refused
+  with "The identity review has not passed"**, recorded a Passed outcome, approved; DB showed role `ASSISTANT`,
+  status `APPROVED`, and audit rows for every step; the public API/profile showed only allow-listed fields (no
+  legal name, email, phone, evidence; no horizontal overflow at 375 px). **All test data was then deleted**
+  (0 users, 0 audit rows; reference seed kept; audit triggers re-enabled; Mailpit emptied).
+- **Not exercised in the browser** (covered only by e2e): changes-requested, rejection, suspension/reinstatement.
 
 ### Defects found and fixed during this milestone
 
-1. `@Header('Cache-Control')` also stamped **404/400 responses** (a shared cache could serve a stale "not
-   found" for a just-approved venue) → success-only interceptor; test added.
-2. Prisma `contains` does **not escape LIKE wildcards** (`q=%` matched everything) → `escapeLike`; tests for
-   public and admin search. A silent no-op in my first fix for the admin search was caught by lint (unused
-   import) and then covered by its own test.
-3. Test-builder misuse and a meaningless placeholder assertion were found and removed; a weak constraint test
-   that could pass for the wrong reason was tightened.
-4. Mobile header links wrapped onto two lines → shorter label, `whitespace-nowrap` on buttons.
-5. Redundant "Kaduna, Kaduna" and repeated venue-wide advisories under every task → fixed with a tested helper.
+1. Stale API build served pre-M1.4 code after the CLI rebuilt `dist` → restarted (process issue, no code defect).
+2. `Requirements` interface not exported (TS4053) → exported.
+3. Several scripted edits were silent no-ops after Prettier reformatting; found by inspection and re-applied.
+4. A public-leak test matched harmless wording ("Manual review by Qyou") → replaced by a recursive key scan.
+5. The per-number phone rate-limit test was convoluted and weak → rewritten with a pre-filled limiter.
+6. Browser run: public profile showed "manual review by qyou" (an over-eager `toLowerCase()`) → fixed.
+7. Browser run: the "Cannot approve yet" blocker stayed visible after the identity outcome made it false → blockers
+   are now tied to the requirements they were computed from (regression test added). A first version used an effect
+   and was rejected by lint (`set-state-in-effect`); the render-derived version is what ships.
+8. Footer still said assistants were not live → updated.
 
 ## Known issues / limitations
 
-- **Enumeration-safe registration is not implemented yet (launch requirement, M1.8).** Registration still
-  returns 409 for existing emails.
-- **No real venues, assistants, reviews or wait times exist** — by design. Venues must be entered by
-  administrators through the API after verification; until then every category/city shows zero locations.
-- **Category names, task wording and eligibility text are my proposal** and need owner review (policy text,
-  not legal advice about third-party rules). They can be edited via the admin API.
-- **No admin web UI**: administration is API-only. Venue submissions by businesses/community don't exist.
-- **Search is `ILIKE`** (fine for hundreds of rows per city); no full-text/trigram, no geo sorting, no map.
-- **Public data is cached up to 60 s** (API header + web revalidate): a change can take about a minute to show.
-- City coordinates are approximate centres; a location has exactly one category.
-- Public response shapes are mirrored by hand in the web app (guarded by shape tests; D-007); OpenAPI lists
-  request bodies but not response schemas.
-- Still true from M1.2: CI has **never run** (D-032); no Playwright suite (D-031); mail is fire-and-forget
-  (D-020); audit integrity has the documented owner/superuser limits (D-028); local DB owner is a superuser.
+**Verification limitations (the important ones):**
+
+- **No identity-verification provider is integrated.** "Passed" means an administrator recorded the outcome of a
+  manual check done outside Qyou. Qyou cannot validate documents, detect forgery or check liveness, and the opaque
+  evidence reference is only as trustworthy as wherever it points. Single reviewer, no dual control; any verified
+  administrator can approve anyone (audited).
+- **No SMS provider exists.** Locally the code arrives by email in Mailpit (labelled SIMULATED). In production,
+  phone verification returns 503, so **no real assistant can complete it until a provider is chosen** (D-038,
+  D-040). A verified number proves control at one moment only (SIM-swap/recycling not mitigated).
+- Legal name and phone are **not encrypted at rest** and have no retention/erasure policy yet (D-043).
+- No profile photos (no safe upload pipeline); no notification emails on decisions; approval never expires.
+- Changes after approval to bio/tasks/times go live without moderation.
+- Not exercised in a browser: changes-requested, rejection and suspension flows (e2e only).
+
+**Carried over:**
+
+- **Enumeration-safe registration is not implemented yet (launch requirement, M1.8).**
+- **No real venues, bookings, reviews or wait times exist** — by design; assistants appear only once a real person
+  has been approved.
+- Category names, task wording and eligibility text are a proposal needing owner review.
+- Search is `ILIKE`; public data is cached up to 60 s; response shapes are mirrored by hand in the web app (D-007).
+- CI has **never run** (D-032); no Playwright suite (D-031); mail is fire-and-forget (D-020); audit integrity has the
+  documented owner/superuser limits (D-028); local DB owner is a superuser.
 
 ## Next action (exact)
 
-**M1.4 — Assistant profile, onboarding and verification** (see ROADMAP.md), as a small vertical slice:
+**M1.5 — Search & discovery API (filters/sort) and quote/request models**, as a small vertical slice:
 
-1. Decide with the owner the minimum real verification evidence at launch (ID type, selfie/liveness or not,
-   references, who reviews) — **no fake identity verification** (PRODUCT.md); the design must not store raw ID
-   documents until storage/encryption/retention is decided (see M1.2 audit/privacy notes).
-2. Schema + migration: `AssistantProfile` (1:1 with user; bio, languages, service cities/categories drawn from
-   the M1.3 reference tables, status `DRAFT→SUBMITTED→APPROVED|REJECTED|SUSPENDED`), `VerificationSubmission`
-   (+ reviewer notes), with append-only audit of every decision.
-3. Customer-side endpoints (own profile only — ownership pattern from M1.2): create/update draft, submit.
-   Admin endpoints (`@AdminOnly`): review queue, approve/reject — **approval calls the existing role-assignment
-   service** to grant `ASSISTANT` (requires verified email); no other path grants the role.
-4. e2e tests (ownership, state machine, escalation attempts, audit); web onboarding form deferred to the M1.6
-   design pass unless needed to prove the flow.
-5. Full `pnpm check`, clean-DB migration test, docs.
+1. Assistant search by city, category/task and language over the _eligible_ set (reuse
+   `publicAssistantWhere`/`canServeTask`), stable pagination and sort (no invented ranking signals: ratings and
+   response times do not exist).
+2. `ServiceRequest` and `Quote` models and state design (ADR before code), integer kobo money, no payments yet.
+3. Owner decisions needed first (below): who may approve assistants and how identity is checked at launch.
+4. e2e tests, docs, full `pnpm check`, clean-DB migration test.
 
 **Before Phase 2 (booking) starts:** M1.8 enumeration-safe registration (D-021) and the owner decisions D-012.
 
@@ -133,4 +122,5 @@ Runtime verification beyond the suites (actually performed):
 - **D-012 (deferred by owner):** payment provider, commission %, fees, cancellation/refund policy, payout
   automation — required before any real payment implementation (Phase 2).
 - Review and edit the seeded categories/tasks wording (D-035) and decide who enters the first real venues.
-- Minimum assistant verification evidence for M1.4 (see above).
+- **Identity-verification provider/process and SMS provider** (D-038 lists the selection requirements); who
+  approves assistants (dual control?); retention/encryption policy for private details (D-043).

@@ -254,6 +254,86 @@ cookie (simplest, revocable, works for Next SSR) vs short-lived JWT access + ref
 Default recommendation: **database-backed sessions + HttpOnly SameSite=Lax cookies**.~~
 **Resolved — see D-011 under Accepted.**
 
+**D-038 Verification-provider decision: NO identity or SMS provider is integrated in M1.4.** Inspection
+found no provider contract, API key, data-processing agreement or owner approval, so nothing may
+receive identity or phone data, and nothing is simulated as if it were real. Identity is a
+**manual review** whose _outcome_ is recorded (D-039); SMS is behind an interface that is simulated
+only in development and **fails closed** in production (D-040). Candidates the owner should
+evaluate (names only — _unverified_ market knowledge, not endorsements; confirm current coverage,
+pricing and terms directly before choosing): for identity, Nigeria-focused KYC vendors such as Smile ID,
+Dojah, Youverify or Prembly (NIN/BVN/liveness checks) or a global vendor; for SMS/OTP, Termii, Africa's
+Talking or Twilio (or WhatsApp/voice OTP). **Selection requirements** (any candidate must meet all):
+(1) legal basis and a signed data-processing agreement covering Nigerian data-protection law (NDPA 2023);
+(2) data residency/transfer terms in writing; (3) the provider returns a _result_ plus a
+reference — Qyou stores only that, never images or ID numbers; (4) signed, replay-protected
+webhooks (or polling) with idempotent handling; (5) sandbox with documented test inputs so tests never hit
+production; (6) delivery receipts and sender-ID registration for Nigerian carriers (DND/ NCC rules)
+for SMS; (7) published uptime, cost per check, and a manual-review fallback; (8) the ability to purge
+data on request. Until then the launch gate in ROADMAP stays open.
+
+**D-039 Manual identity review stores outcomes only.** `IdentityCheck` rows hold `result`
+(PASSED/FAILED/INCONCLUSIVE), `method = MANUAL_REVIEW`, the reviewing admin, an optional opaque
+`evidenceRef` and short notes. Any value containing a run of ≥ 9 digits (after stripping spaces,
+dots, hyphens) is rejected so an ID/card/phone number cannot be pasted into those fields; this is a
+tripwire, not a guarantee. Raw documents, selfies and ID numbers are never accepted by any endpoint, and
+there is no upload feature; evidence stays in whatever secure system the reviewer uses. The latest
+outcome is denormalised to `identityOutcome` on the profile and only `PASSED` satisfies
+approval. Recording an outcome is allowed only while the application is under review and is audited. A
+single reviewer is a **limitation** (no dual control); see ROADMAP deferrals.
+Alternatives: store documents in PostgreSQL / ordinary uploads (forbidden by the brief and a data
+breach liability), integrate a provider now (no approved provider, D-038).
+
+**D-040 Phone verification: provider interface, simulated only in development, fail-closed in
+production.** `SmsService.send(phone, message)`. `SMS_PROVIDER=dev` (default outside production) emails the
+message to Mailpit labelled **SIMULATED — no SMS was sent**; `SMS_PROVIDER=none` (the production default,
+and the only value production accepts) returns 503 _before_ any code is created, so the user is told
+verification is unavailable instead of waiting for a text that will never arrive. Codes are 6 digits
+from a CSPRNG, stored only as `HMAC-SHA256(PHONE_CODE_PEPPER, tokenId|phone|code)` (a bare hash of a
+6-digit code is brute-forceable from a DB dump), single-use (atomic claim), 10-minute TTL, 5 attempts
+via an atomic counter, 60 s resend cooldown, and rate limits of 5 requests/h per user, 3/h per number and
+10 verification attempts/15 min per user (plus per-IP caps on the endpoints). Only Nigerian (+234) mobile numbers are accepted; a verified
+number is unique across accounts (partial unique index). Verifying a number does not grant any role.
+`PHONE_CODE_PEPPER` is required (≥ 32 chars) in production. Limitation: SIM-swap and number-recycling
+risk are not mitigated; the dev path is not evidence of delivery.
+
+**D-041 Role invariant: the ASSISTANT role exists if and only if the application is APPROVED.**
+Approval and suspension/rejection change the application status and the user role in **one
+transaction**, using the existing `AdminUsersService.assignRoleInTransaction` (the same code path as
+manual role assignment, so its rules and audit apply). There is no public or self-service route that
+grants ASSISTANT, completing a profile grants nothing, and role changes still require a verified-email
+user. Approval re-checks every requirement server-side inside the transaction (email, phone, identity PASSED,
+completeness) and returns the list of blockers. Alternatives: separate "assistant enabled" flag (two
+sources of truth), grant the role at submission (violates the policy).
+
+**D-042 Application state machine and edit locks.** States: DRAFT, SUBMITTED, UNDER_REVIEW,
+CHANGES_REQUESTED, APPROVED, REJECTED, SUSPENDED. Allowed: DRAFT→SUBMITTED; CHANGES_REQUESTED→SUBMITTED;
+SUBMITTED→UNDER_REVIEW; UNDER_REVIEW→CHANGES_REQUESTED|APPROVED|REJECTED; REJECTED→UNDER_REVIEW
+(reconsideration); APPROVED→SUSPENDED; SUSPENDED→APPROVED|REJECTED. Every decision except starting a
+review needs a reason (≥ 10 characters, shown to the applicant) and is audited in the same transaction.
+Applicants edit freely in DRAFT/CHANGES_REQUESTED; while SUBMITTED/UNDER_REVIEW/REJECTED/SUSPENDED nothing is
+editable (so a reviewer never approves content that changes underneath them); once APPROVED only
+non-identity fields can change (display name and legal name are locked, because they are what was verified).
+Changing offered tasks after approval is allowed but re-validated against the reference data.
+
+**D-043 Private assistant data: separate table, no public path, encryption/retention not yet done.** Legal name
+and phone live in `assistant_private_details`, which no public query selects (public output is an
+explicit allow-list, covered by a recursive key-scan test). Admin reads of private details are
+audited every time (`admin.assistant.private_viewed`). **Not done, tracked as a launch gate:**
+application-level encryption at rest for these columns, a retention and erasure policy (including
+what happens to rejected applicants), and DSAR tooling. The audit log still holds actor ids and
+reasons, never phone numbers or legal names.
+
+**D-044 Eligibility gate and public visibility.** `AssistantEligibilityGuard` (global, after the
+verified-email guard) protects future paid-work endpoints declared with `@RequiresAssistantEligibility()`:
+active user ∧ role ASSISTANT ∧ email verified ∧ APPROVED ∧ phone verified ∧ identity PASSED ∧ ≥ 1
+active city ∧ ≥ 1 effective offered task. `canServeTask(assistant, task, location)` reuses the M1.3
+venue-restriction logic so a task a venue forbids is never offered there. Public listing/profile
+show an assistant only when fully eligible and expose no ratings, reviews, response times or
+counts, since none exist. Offering a non-delegable task is rejected by the API and by a database
+trigger. Availability is stored as _preferred windows_ (max 4/day, no overlap, minutes since
+midnight, timezone default Africa/Lagos) and displayed with an explicit disclaimer; it never
+blocks or guarantees a booking.
+
 **D-012 Payment provider and policies — DEFERRED by the owner on 2026-10-23; required before any real payment implementation (start of Phase 2 payments).** Needs evaluation of current availability and
 requirements for Nigeria (candidates: Paystack, Flutterwave) plus **your decisions** on platform
 commission %, customer fees, cancellation/refund policy, and whether payouts are automated or

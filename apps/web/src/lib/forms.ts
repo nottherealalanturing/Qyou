@@ -1,9 +1,11 @@
 import type { FieldErrors } from './validation';
 
 export type SubmitResult<T> =
-  { ok: true; data: T } | { ok: false; status: number; message: string; fieldErrors: FieldErrors };
+  | { ok: true; data: T }
+  | { ok: false; status: number; message: string; fieldErrors: FieldErrors; blockers: string[] };
 
 interface ApiErrorBody {
+  blockers?: unknown;
   message?: unknown;
   issues?: { path?: unknown; message?: unknown }[];
   retryAfterSeconds?: unknown;
@@ -23,24 +25,26 @@ export function describeError(status: number, body: ApiErrorBody): string {
       ? 'Please fix the highlighted fields.'
       : (message ?? 'That request was not valid.');
   if (status === 401 || status === 409) return message ?? 'Something went wrong.';
+  if (status === 503) return message ?? 'This is not available right now.';
   if (status === 403) return 'Your request was blocked. Reload the page and try again.';
   if (status === 413) return 'That request was too large.';
   if (status === 429) return `Too many attempts.${retryHint(body.retryAfterSeconds)}`;
   return 'Something went wrong on our side. Please try again in a moment.';
 }
 
-/** POST JSON to the same-origin API proxy. Never throws. */
-export async function postJson<T = unknown>(
+/** Send JSON to the same-origin API proxy. Never throws. */
+export async function sendJson<T = unknown>(
+  method: 'POST' | 'PUT' | 'PATCH' | 'DELETE',
   path: string,
-  payload: unknown,
+  payload?: unknown,
 ): Promise<SubmitResult<T>> {
   let response: Response;
   try {
     response = await fetch(path, {
-      method: 'POST',
+      method,
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify(payload),
+      ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
     });
   } catch {
     return {
@@ -48,6 +52,7 @@ export async function postJson<T = unknown>(
       status: 0,
       message: 'We could not reach Qyou. Check your connection and try again.',
       fieldErrors: {},
+      blockers: [],
     };
   }
 
@@ -77,5 +82,12 @@ export async function postJson<T = unknown>(
     status: response.status,
     message: describeError(response.status, errorBody),
     fieldErrors,
+    blockers: Array.isArray(errorBody.blockers)
+      ? errorBody.blockers.filter((b): b is string => typeof b === 'string')
+      : [],
   };
 }
+
+/** POST JSON to the same-origin API proxy. Never throws. */
+export const postJson = <T = unknown>(path: string, payload: unknown) =>
+  sendJson<T>('POST', path, payload);
