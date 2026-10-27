@@ -2,6 +2,7 @@ node_modules/
 dist/
 build/
 .next/
+.next-e2e/
 .turbo/
 *.tsbuildinfo
 coverage/
@@ -15,3 +16,7 @@ pnpm-debug.log*
 # Prisma generated client (rebuilt by `pnpm --filter @qyou/api db:generate`)
 apps/api/src/generated/
 apps/web/next-env.d.ts
+# Playwright
+apps/e2e/test-results/
+apps/e2e/playwright-report/
+apps/e2e/.state/

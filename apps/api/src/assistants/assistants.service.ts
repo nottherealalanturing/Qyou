@@ -12,6 +12,7 @@ import { isUniqueViolation } from '../common/db-errors.js';
 import { validationFailed, type FieldIssue } from '../common/http/validation-error.js';
 import { slugify } from '../common/text.js';
 import type { Prisma } from '../generated/prisma/client.js';
+import { lockAssistantForChange } from './eligibility-locks.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { AssistantEligibilityService } from './assistant-eligibility.service.js';
 import {
@@ -358,6 +359,7 @@ export class AssistantsService {
     if (issues.length > 0) throw validationFailed(issues);
 
     await this.prisma.$transaction(async (tx) => {
+      await lockAssistantForChange(tx, user.id);
       await tx.assistantServiceArea.deleteMany({ where: { profileId: profile.id } });
       await tx.assistantTaskOffer.deleteMany({ where: { profileId: profile.id } });
       if (dto.cityIds.length)
@@ -442,6 +444,7 @@ export class AssistantsService {
 
     if (changed.length > 0) {
       await this.prisma.$transaction(async (tx) => {
+        await lockAssistantForChange(tx, user.id);
         await tx.assistantPrivateDetails.update({ where: { profileId: profile.id }, data });
         if (changed.includes('phone')) {
           // Codes sent to the previous number must not verify the new one.
@@ -503,6 +506,7 @@ export class AssistantsService {
 
     const from = profile.status;
     await this.prisma.$transaction(async (tx) => {
+      await lockAssistantForChange(tx, user.id);
       // Conditional on the status we read, so a concurrent change cannot be overwritten.
       const moved = await tx.assistantProfile.updateMany({
         where: { id: profile.id, status: from },

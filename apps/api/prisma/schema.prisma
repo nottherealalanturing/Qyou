@@ -44,6 +44,7 @@ model User {
   emailVerificationTokens EmailVerificationToken[]
   assistantProfile        AssistantProfile?
   identityChecksRecorded  IdentityCheck[]
+  serviceRequests         ServiceRequest[]
 
   @@map("users")
 }
@@ -180,6 +181,7 @@ model City {
 
   locations      ServiceLocation[]
   assistantAreas AssistantServiceArea[]
+  requests       ServiceRequest[]
 
   @@unique([state, name])
   @@index([isActive, sortOrder])
@@ -230,6 +232,7 @@ model EligibleTask {
   category        ServiceCategory       @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   restrictions    LocationRestriction[]
   assistantOffers AssistantTaskOffer[]
+  requests        ServiceRequest[]
 
   @@unique([categoryId, slug])
   @@unique([categoryId, nameKey])
@@ -254,6 +257,7 @@ model ServiceLocation {
   city         City                  @relation(fields: [cityId], references: [id], onDelete: Restrict)
   category     ServiceCategory       @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   restrictions LocationRestriction[]
+  requests     ServiceRequest[]
 
   @@index([cityId, status])
   @@index([categoryId, status])
@@ -337,6 +341,7 @@ model AssistantProfile {
   availability   AssistantAvailabilityWindow[]
   identityChecks IdentityCheck[]
   phoneTokens    PhoneVerificationToken[]
+  quotes         Quote[]
 
   @@index([status, createdAt])
   @@index([status, identityOutcome])
@@ -436,4 +441,99 @@ model IdentityCheck {
 
   @@index([profileId, createdAt])
   @@map("identity_checks")
+}
+
+// ───────────────────── Service requests and quotes (M1.5) ─────────────────────
+// A request is a customer's ask; a quote is an assistant's priced proposal. Nothing here moves money.
+// Status changes happen only in services, under `SELECT … FOR UPDATE` on the request row; partial
+// unique indexes, CHECKs and triggers in the migration are the database backstop.
+// See docs/ARCHITECTURE.md "Service requests, quotes and assistant discovery".
+
+enum ServiceRequestStatus {
+  OPEN
+  QUOTED
+  QUOTE_ACCEPTED
+  CANCELLED
+}
+
+enum ScheduleKind {
+  FLEXIBLE
+  ON_DATE
+}
+
+enum TimePeriod {
+  ANY
+  MORNING
+  AFTERNOON
+  EVENING
+}
+
+enum QuoteStatus {
+  PENDING
+  ACCEPTED
+  NOT_SELECTED
+  WITHDRAWN
+  REQUEST_CLOSED
+}
+
+model ServiceRequest {
+  id                       String               @id @default(uuid(7)) @db.Uuid
+  customerId               String               @db.Uuid
+  taskId                   String               @db.Uuid
+  /// Always set. When `locationId` is given it equals that venue's city (trigger-enforced).
+  cityId                   String               @db.Uuid
+  locationId               String?              @db.Uuid
+  /// PRIVATE: visible only to the owner and to matching, eligible assistants.
+  description              String               @db.VarChar(1000)
+  constraints              String?              @db.VarChar(500)
+  scheduleKind             ScheduleKind
+  /// A calendar date in the city's timezone (not an instant). Required iff scheduleKind = ON_DATE.
+  preferredDate            DateTime?            @db.Date
+  preferredPeriod          TimePeriod           @default(ANY)
+  /// Server-computed: end of the preferred date, or creation + 14 days. Past this the request accepts no quotes.
+  expiresAt                DateTime             @db.Timestamptz(3)
+  /// Set when the customer confirmed they will provide the authorization the task requires.
+  authorizationConfirmedAt DateTime?            @db.Timestamptz(3)
+  status                   ServiceRequestStatus @default(OPEN)
+  statusChangedAt          DateTime             @default(now()) @db.Timestamptz(3)
+  acceptedAt               DateTime?            @db.Timestamptz(3)
+  closedAt                 DateTime?            @db.Timestamptz(3)
+  closureReason            String?              @db.VarChar(300)
+  createdAt                DateTime             @default(now()) @db.Timestamptz(3)
+  updatedAt                DateTime             @updatedAt @db.Timestamptz(3)
+
+  customer User             @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  task     EligibleTask     @relation(fields: [taskId], references: [id], onDelete: Restrict)
+  city     City             @relation(fields: [cityId], references: [id], onDelete: Restrict)
+  location ServiceLocation? @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  quotes   Quote[]
+
+  @@index([customerId, createdAt(sort: Desc)])
+  @@index([status, cityId, taskId, expiresAt])
+  @@index([locationId])
+  @@map("service_requests")
+}
+
+model Quote {
+  id              String      @id @default(uuid(7)) @db.Uuid
+  requestId       String      @db.Uuid
+  assistantId     String      @db.Uuid
+  /// Integer kobo (minor units). Never a float.
+  amountKobo      Int
+  /// Only NGN is accepted (CHECK). A placeholder for the unresolved currency policy, not a decision.
+  currency        String      @default("NGN") @db.Char(3)
+  message         String?     @db.VarChar(1000)
+  status          QuoteStatus @default(PENDING)
+  statusChangedAt DateTime    @default(now()) @db.Timestamptz(3)
+  createdAt       DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime    @updatedAt @db.Timestamptz(3)
+
+  request   ServiceRequest   @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  assistant AssistantProfile @relation(fields: [assistantId], references: [id], onDelete: Restrict)
+
+  // Partial unique indexes (one ACCEPTED per request; one active quote per assistant and request)
+  // are added by hand in the migration (Prisma cannot express them).
+  @@index([requestId, status])
+  @@index([assistantId, createdAt(sort: Desc)])
+  @@map("quotes")
 }

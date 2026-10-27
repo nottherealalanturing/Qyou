@@ -15,6 +15,7 @@ import { MailModule } from './mail/mail.module.js';
 import { SeedModule } from './seed/seed.module.js';
 import { ServiceCategoriesModule } from './service-categories/service-categories.module.js';
 import { ServiceLocationsModule } from './service-locations/service-locations.module.js';
+import { ServiceRequestsModule } from './service-requests/service-requests.module.js';
 import { PrismaModule } from './prisma/prisma.module.js';
 
 @Module({
@@ -29,6 +30,7 @@ import { PrismaModule } from './prisma/prisma.module.js';
     ServiceCategoriesModule,
     ServiceLocationsModule,
     AssistantsModule,
+    ServiceRequestsModule,
     SeedModule,
     HealthModule,
   ],

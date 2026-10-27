@@ -217,7 +217,76 @@ Local reset of assistant test data (owner role; audit rows are append-only, so t
 `ALTER TABLE audit_logs DISABLE TRIGGER USER; DELETE FROM … ; ALTER TABLE audit_logs ENABLE TRIGGER USER;`
 Never do this against any shared or production database.
 
+## Requests and quotes: local testing and operations (M1.5)
+
+No new environment variables. To exercise the journey locally you need: the reference seed (`pnpm db:seed`), an
+administrator (see Administrator bootstrap), at least one **approved** assistant (see the assistant review workflow
+above: apply → verify phone via the simulated code in Mailpit → admin records a Passed identity outcome → admin
+approves), and a separate verified customer account (a customer cannot be the assistant). Then:
+
+1. Customer: `/assistants` (filter) → profile → **Post a request**, or `/requests/new`.
+2. Assistant: `/assistant/requests` shows requests matching what they offer and the cities they serve; open one and
+   send a quote. The assistant never sees the customer's identity.
+3. Customer: `/requests/<id>` lists quotes (cheapest first). **Accept** one (confirmation step); the rest become
+   "not selected". Nothing is charged and there is no booking.
+4. Either side can see the result; the customer can cancel (reason required after accepting).
+
+Operational facts: the public assistant list is cached for up to 60 s (API and web), so a newly approved assistant
+or a change in what they offer appears within about a minute; requests, quotes and feeds are never cached. Expiry
+is computed when a request is read (no job runs): an `OPEN`/`QUOTED` row past `expiresAt` is shown as Expired.
+Requests and quotes cannot be deleted by the application (the runtime role has no `DELETE` on them); to clean a
+**local** database, as the owner role: `ALTER TABLE quotes DISABLE TRIGGER USER; ALTER TABLE service_requests
+DISABLE TRIGGER USER; DELETE FROM quotes; DELETE FROM service_requests; …re-enable both…` — never on a shared database.
+
+## Browser tests (Playwright, M1.5.1)
+
+What it is: `apps/e2e`, Playwright 1.64.0 (version-pinned) driving Chromium against the real API, a production web build
+and the dedicated **`qyou_test`** database (D-055). It starts its own servers on **ports 4100 (API) and 3100 (web)**, so it
+does not touch a dev server on 3000/4000, and it never reuses a server that is already running.
+
+One-time setup (needs the Postgres container, `pnpm db:up`):
+
+```bash
+pnpm install
+pnpm db:roles
+pnpm db:deploy:test
+pnpm e2e:browsers
+```
+
+Then, from the repository root:
+
+```bash
+pnpm e2e:build
+pnpm e2e
+```
+
+- `pnpm e2e:build` builds the API (`dist/`) and the web app into `apps/web/.next-e2e` with the test API address baked in
+  (Next resolves rewrites at build time). Re-run it after changing API or web code; a stale build is the usual cause of
+  "my change isn't tested".
+- `pnpm e2e` runs every test. One file: `pnpm --filter @qyou/e2e exec playwright test tests/privacy.spec.ts`; watch it:
+  `pnpm --filter @qyou/e2e e2e:headed`; after a failure open the trace: `pnpm --filter @qyou/e2e exec playwright show-trace
+apps/e2e/test-results/<test>/trace.zip` (screenshots and an `error-context.md` snapshot are kept there too).
+- Data and cleanup: global setup **refuses to run unless both `TEST_ADMIN_DATABASE_URL` and `TEST_DATABASE_URL` point at a
+  local host and a database ending in `_test`** (defaults match `docker-compose.yml` on port 5452, or `QYOU_DB_PORT`),
+  checks the marketplace tables exist, empties every application table, removes the Next data cache, and seeds one shared
+  catalog (City A/B, one category, three tasks, one venue). Each spec creates its own users through the real API (email
+  marked verified in the database), onboards assistants through the real review workflow (phone ownership set in the
+  database: no SMS), and signs in through the real login form. Teardown empties the database again. Nothing depends on a
+  personal account, Mailpit, SMS or any external service. It shares `qyou_test` with `pnpm test:e2e`, so do not run both at once.
+- CI: the `browser` job in `.github/workflows/ci.yml` does the same on a Postgres service. **It has not been executed on
+  GitHub** (D-032): treat it as configuration until a real run is green.
+- Limits: Chromium only; layout is asserted by measurement (no horizontal overflow, controls inside a 375px screen), not
+  by pixel comparison; the server clock can't be faked from a browser, so expired requests are inserted already expired.
+
 ## Troubleshooting
+
+- **`pnpm e2e`: "Refusing to run: … must point at a local database whose name ends in "\_test""** — the guard in
+  `apps/e2e/src/db.ts`; fix `TEST_ADMIN_DATABASE_URL`/`TEST_DATABASE_URL`.
+- **`pnpm e2e`: "has no marketplace tables"** — run `pnpm db:roles && pnpm db:deploy:test`.
+- **`pnpm e2e`: "http://localhost:3100 is already used" / the API port is** — a previous run is still alive; stop it
+  (`lsof -nP -iTCP:3100 -iTCP:4100 -sTCP:LISTEN`). The suite never reuses a running server on purpose.
+- **Browser test sees an old UI or a missing city** — rebuild with `pnpm e2e:build`; the web caches the catalog for 60 s
+  (global setup clears the cache and seeds the catalog before any page is requested).
 
 - **`npm install` fails with `Cannot read properties of null (reading 'edgesOut')`** — npm 11.5.1
   bug on this machine; use pnpm.
@@ -272,3 +341,16 @@ Never do this against any shared or production database.
 - **Applicant cannot edit their application** — it is locked while submitted/under review/rejected/suspended; after
   approval only non-identity fields are editable (D-042).
 - **403 "You cannot review your own application"** — another administrator must review it.
+- **Posting a request returns 400 on `description`/`constraints`** — it contains an email address, a link or a run of
+  nine or more digits (phone/ID-like). Remove it; this is intentional.
+- **Posting returns 400 on `taskId`** — the task is inactive, not delegable, or prohibited at the chosen venue;
+  tasks that need authorization also need `confirmsAuthorization: true`.
+- **409 "You already have 10 active requests"** — cancel one first (expired requests do not count).
+- **An assistant gets 404 for a request they expect to see** — they must be fully eligible, offer that exact task,
+  serve its city, and the venue (if any) must not prohibit it; the request must be open and unexpired. 404 is
+  deliberate for anything an assistant may not see.
+- **An assistant gets 403 "ASSISTANT_NOT_ELIGIBLE" on `/assistants/me/requests`** — see `GET /assistants/me/eligibility`
+  for the unmet conditions.
+- **Customer sees "can't accept" on a quote** — that assistant is no longer eligible (e.g. suspended); choose another
+  quote.
+- **409 "A quote has already been accepted"** — selection is single-winner; a concurrent second attempt gets this.

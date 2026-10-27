@@ -1,7 +1,10 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { skipTake, toPage, type Page } from '../common/pagination.js';
+import { publicLocationWhere } from '../common/public-visibility.js';
+import { escapeLike } from '../common/text.js';
 import type { Prisma } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { applyVenueRestrictions } from '../service-locations/venue-rules.js';
 import { LANGUAGES } from './assistants.schemas.js';
 import { formatMinutes } from './availability.js';
 import type { PublicAssistantQuery } from './assistants.schemas.js';
@@ -18,14 +21,34 @@ const EFFECTIVE_TASK = {
  * verified, email verified, active account and role, with at least one open city and offered task.
  * Anything less is indistinguishable from "does not exist".
  */
+export interface PublicAssistantFilters {
+  city?: string | undefined;
+  category?: string | undefined;
+  task?: string | undefined;
+  language?: string | undefined;
+  q?: string | undefined;
+  /** Restrict to these task ids (used for venue searches: tasks the venue does not prohibit). */
+  allowedTaskIds?: string[] | undefined;
+}
+
 export function publicAssistantWhere(
-  filters: { city?: string | undefined; category?: string | undefined } = {},
+  filters: PublicAssistantFilters = {},
 ): Prisma.AssistantProfileWhereInput {
+  const q = filters.q ? escapeLike(filters.q) : undefined;
   return {
     status: 'APPROVED',
     identityOutcome: 'PASSED',
     user: { status: 'ACTIVE', role: 'ASSISTANT', emailVerifiedAt: { not: null } },
     privateDetails: { is: { phoneVerifiedAt: { not: null } } },
+    ...(filters.language ? { languages: { has: filters.language } } : {}),
+    ...(q
+      ? {
+          OR: [
+            { displayName: { contains: q, mode: 'insensitive' as const } },
+            { bio: { contains: q, mode: 'insensitive' as const } },
+          ],
+        }
+      : {}),
     serviceAreas: {
       some: { city: { isActive: true, ...(filters.city ? { slug: filters.city } : {}) } },
     },
@@ -33,6 +56,8 @@ export function publicAssistantWhere(
       some: {
         task: {
           ...EFFECTIVE_TASK,
+          ...(filters.task ? { slug: filters.task } : {}),
+          ...(filters.allowedTaskIds ? { id: { in: filters.allowedTaskIds } } : {}),
           category: { isActive: true, ...(filters.category ? { slug: filters.category } : {}) },
         },
       },
@@ -134,6 +159,9 @@ export function toPublicAssistantCard(row: PublicRow) {
     languages: languageList(row.languages),
     cities: cities(row),
     categories: groupOffers(row).map((g) => g.category),
+    tasks: groupOffers(row).flatMap((g) =>
+      g.tasks.map((t) => ({ slug: t.slug, name: t.name, categorySlug: g.category.slug })),
+    ),
   };
 }
 
@@ -166,7 +194,48 @@ export class AssistantsPublicService {
   constructor(private readonly prisma: PrismaService) {}
 
   async list(query: PublicAssistantQuery): Promise<Page<ReturnType<typeof toPublicAssistantCard>>> {
-    const where = publicAssistantWhere({ city: query.city, category: query.category });
+    const filters: PublicAssistantFilters = {
+      city: query.city,
+      category: query.category,
+      task: query.task,
+      language: query.language,
+      q: query.q,
+    };
+    const empty = () => toPage([], 0, query.page, query.pageSize);
+
+    if (query.location) {
+      // A venue implies its city and category; a conflicting explicit filter simply matches nothing.
+      const location = await this.prisma.serviceLocation.findFirst({
+        where: { slug: query.location, ...publicLocationWhere() },
+        include: {
+          restrictions: true,
+          city: { select: { slug: true } },
+          category: { select: { slug: true } },
+        },
+      });
+      if (!location) return empty();
+      if (query.city && query.city !== location.city.slug) return empty();
+      if (query.category && query.category !== location.category.slug) return empty();
+      const tasks = await this.prisma.eligibleTask.findMany({
+        where: {
+          categoryId: location.categoryId,
+          isActive: true,
+          eligibility: { not: 'NOT_DELEGABLE' },
+          ...(query.task ? { slug: query.task } : {}),
+        },
+      });
+      filters.city = location.city.slug;
+      filters.category = location.category.slug;
+      filters.allowedTaskIds = tasks
+        .filter(
+          (t) =>
+            applyVenueRestrictions(t, location.restrictions).effectiveEligibility !==
+            'NOT_DELEGABLE',
+        )
+        .map((t) => t.id);
+    }
+
+    const where = publicAssistantWhere(filters);
     const [rows, total] = await Promise.all([
       this.prisma.assistantProfile.findMany({
         where,

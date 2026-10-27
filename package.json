@@ -25,7 +25,10 @@
     "db:deploy:test": "pnpm --filter @qyou/api db:deploy:test",
     "db:deploy": "pnpm --filter @qyou/api db:deploy",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm test:e2e && pnpm build",
-    "verify:headers": "pnpm --filter @qyou/web verify:headers"
+    "verify:headers": "pnpm --filter @qyou/web verify:headers",
+    "e2e:browsers": "pnpm --filter @qyou/e2e browsers",
+    "e2e:build": "pnpm --filter @qyou/e2e prepare:e2e",
+    "e2e": "pnpm --filter @qyou/e2e e2e"
   },
   "devDependencies": {
     "oxlint": "^1.89.0",

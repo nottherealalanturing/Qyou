@@ -183,7 +183,7 @@ because Next's dev tooling injects un-nonced style elements (observed: empty-str
 violations in the browser console). The strict policy is verified against the production build
 (`pnpm verify:headers`, CI step, unit tests). All pages must stay dynamic. No CSP reporting yet.
 
-**D-031 Browser automation suite (Playwright) — deferred to M1.7, with interim controls.** A real
+**D-031 Browser automation suite (Playwright) — deferred to M1.7, with interim controls. _Partly superseded by D-055: the marketplace journey is now automated._** A real
 browser suite needs a browser download, a test-environment orchestration story (API + web + DB +
 Mailpit) and flake management; that is its own milestone and was already planned (M1.7). It would
 not have changed any M1.2 security conclusion because the security properties are enforced and
@@ -333,6 +333,114 @@ counts, since none exist. Offering a non-delegable task is rejected by the API a
 trigger. Availability is stored as _preferred windows_ (max 4/day, no overlap, minutes since
 midnight, timezone default Africa/Lagos) and displayed with an explicit disclaimer; it never
 blocks or guarantees a booking.
+
+**D-045 Marketplace shape for M1.5: open requests with competing quotes; selection ends at `QUOTE_ACCEPTED`.**
+A customer posts a request; every currently-eligible assistant who offers the task, serves the city and is not
+barred by a venue rule may quote; the customer selects exactly one. Alternatives: directed requests ("hire this
+assistant") and instant booking from a profile — both need availability, pricing and acceptance rules that depend
+on the unresolved payment/fee decisions (D-012), so they are deferred, not rejected. There is **no Booking entity**
+yet: the booking state machine in ARCHITECTURE starts at `awaiting_payment`, and creating a booking row with no
+payment path would be a placeholder presented as a capability. `QUOTE_ACCEPTED` is the honest end state and the
+hand-off point for Phase 2. The UI says plainly that nothing is charged and nothing is confirmed.
+
+**D-046 Request design: dates not instants, derived expiry, immutable text, no reopen.** Scheduling is a calendar
+date in the city's timezone plus a coarse period (or "flexible"), so no timezone arithmetic reaches the UI; the only
+computed instant is `expiresAt` (end of the date, or +14 days when flexible), set by the server. `EXPIRED` is derived
+from the clock, never stored: there is no background job, and a stored `OPEN` row past expiry simply stops accepting
+quotes and drops out of feeds. Requests cannot be edited after creation (quotes were priced against the text) and a
+cancelled request is final; the safe reversible default is "cancel and post a new one". Reversibility lives in
+quote withdrawal and `QUOTED → OPEN`. Free text is rejected if it contains an email address, a link or a 9+ digit run
+(the same tripwire idea as D-039): contact details stay private and conversations do not leave the platform before
+messaging exists. Caps: 10 live requests per customer, 3 quote rows per assistant per request, 20 pending quotes per
+request. An assistant account may also post requests (D-025: one account, one role, but an assistant is still a
+customer); admins and business staff cannot.
+
+**D-047 Concurrency: one row lock per request, with database backstops.** Every submit/withdraw/select/cancel runs
+in one transaction that begins with `SELECT … FROM service_requests WHERE id = $1 FOR UPDATE`, re-reads state, then
+writes; creation locks the customer's `users` row to enforce the live-request cap. Alternatives: optimistic
+versioning (needs retry logic for every action), SERIALIZABLE isolation (retries, harder to reason about), advisory
+locks (not tied to the row). The backstops hold even if application code is wrong: partial unique indexes (one
+`ACCEPTED` quote per request; one active quote per assistant per request), CHECK constraints, and triggers that
+enforce immutability, the transition tables, delegability/venue consistency, "no self-quote" and "no quote on a
+closed request". Mutation-tested: removing the lock makes the concurrent-selection test fail.
+
+**D-048 Quote money: integer kobo, `NGN` as a placeholder, sanity bounds only.** `amountKobo` is an integer (never a
+float; the web converts typed naira with string arithmetic and round-trip tests). `currency` exists and is
+CHECK-constrained to `NGN` so the column survives a currency policy later, but **this is not a currency decision**.
+₦100–₦500,000 are sanity bounds on a proposal, not pricing policy. No platform fee, commission, tax or customer fee is
+modelled or implied anywhere; the UI says fees are not defined. Quote status "paid" does not exist. D-012 (provider,
+fees, refunds, payouts) remains open and blocks any money movement.
+
+**D-049 Discovery and quoting reuse the authoritative eligibility logic.** Quoting and selecting call
+`AssistantEligibilityService.canServe` (full `decideEligibility` + task offered + city served + venue restriction via
+`applyVenueRestrictions`), inside the request's transaction. Two database predicates exist only for pagination and
+cost: `publicAssistantWhere` (public list) and the open-request feed predicate. Rather than trusting that they match,
+tests build an assistant that fails each rule in turn and assert list/profile membership equals
+`evaluate().eligibleForPaidJobs`, and assert feed membership equals `canServe` across cities, tasks, venue-wide and
+task-specific prohibitions and venues prohibited after posting. Alternative: evaluate every row with the service
+(N+1 queries, breaks totals). The equivalence tests are the control; a new eligibility rule must change both and the tests.
+
+**D-050 Privacy of requests and quotes.** Customers' names, emails and ids never appear in any assistant-facing
+response; a request's text is visible only to its owner, matching eligible assistants and an assistant who already
+quoted. A request or quote that is not yours is 404 (identical to a missing one), including for admins, who get no
+access to request data at all. Audit rows hold ids, enums, counts and quote amounts only — never description,
+constraints, quote message or cancellation reason. The public API never joins requests or quotes.
+
+**D-051 The runtime database role cannot DELETE requests or quotes.** The product has no deletion; `REVOKE DELETE`
+on both tables makes that a database fact. FKs are `RESTRICT`. Deletion/erasure of customer data (retention policy)
+remains an open item (D-043).
+
+**D-052 Eligibility concurrency: a compatible lock protocol, not a single lock (M1.5.1).** Quoting and selecting decide
+eligibility from several rows (the assistant's user and profile, private details, offers and areas, and the task,
+category, city and venue with its restrictions). Locking only the request row — what M1.5 did — leaves every one
+of those free to change between the check and the commit. Protocol, with `READ COMMITTED` (the PostgreSQL default;
+no `SERIALIZABLE`, so no retry loops): (1) **readers** (`submitQuote`, `selectQuote`) lock the request `FOR UPDATE`,
+then the catalog rows (task + its category, city, venue) `FOR SHARE`, then the assistant's `users` row `FOR SHARE`, and
+only then evaluate `canServe`; (2) **writers** of anything that can revoke eligibility take `FOR NO KEY UPDATE` on the
+assistant's `users` row first (`lockAssistantForChange`: admin transitions, identity outcomes, role changes, services,
+private details/phone, submit), or on the venue row for restriction edits (`lockVenueForChange`); catalog edits
+(city/task/category/venue updates) are plain `UPDATE`s, which already take a conflicting row lock. `FOR SHARE`
+conflicts with `FOR NO KEY UPDATE`/`UPDATE` but not with `FOR SHARE`, so unrelated quotes still run in parallel and only
+work on the same assistant or catalog row is ordered; `NO KEY UPDATE` does not block foreign-key inserts (sessions,
+quotes). Order is request → catalog → assistant user and every writer holds at most one of these before its own writes,
+so no lock cycle exists and no deadlock retry is needed. **Guarantee:** a quote is never submitted, and a quote is never
+accepted, on an eligibility state that a change _committed before the decision commits_ has invalidated; a change that
+would invalidate it either commits first (the decision sees it and refuses) or waits until the decision commits (a
+legitimate order: accepted, then suspended). It is **not** a guarantee that an assistant stays eligible after
+acceptance — Phase 2 booking must call `canServe` again. Granting changes (email/phone verification) take no lock: they
+can only make an assistant eligible, so a stale "not eligible" is the safe direction. Rejected: locking the request only
+(the M1.5 gap), advisory locks (not tied to rows, easy to forget), `SERIALIZABLE` (aborts under contention, retry
+handling everywhere). **New writers of eligibility inputs must take these locks; the concurrency tests fail if they
+do not.** Alternative left open: a DB trigger could re-check eligibility on `ACCEPTED`, but it would duplicate
+`decideEligibility` in SQL (two sources of truth).
+
+**D-053 The 20-pending-quote cap is enforced under the request lock and covered by e2e tests (M1.5.1).** The count and
+the insert both run inside the request's `FOR UPDATE` transaction (D-047), so concurrent submissions are ordered and
+the persisted pending count cannot exceed `MAX_PENDING_QUOTES_PER_REQUEST`. A withdrawn, not-selected or closed quote
+no longer counts. There is deliberately no database CHECK for the cap (it would need a trigger counting rows under the
+same lock); the lock plus the tests (19→20 accepted, 21st rejected, a freed slot reusable once, 5 racers for 2 slots,
+withdraw racing submit, mutation-checked by removing the lock) are the control.
+
+**D-054 Cancellation reason: preserved as written, product decision still open (M1.5.1).** The M1.5 design note
+(ARCHITECTURE, state table and API table) says a reason is required _once a quote was accepted_ and optional before;
+the API, the UI label ("required: an assistant was chosen") and the tests agree, and a whitespace-only reason counts as
+none. The owner has not ratified this as product policy, and there is no D-entry before this one. **Decision needed
+from the owner:** keep it, or require a reason on every cancellation (and whether repeated cancellations are
+moderated). Until then nothing changes. (Also noted: the UI shows the generic "Your request was blocked" for any 403,
+including "no longer eligible".)
+
+**D-055 Browser suite: Playwright, real API + production web build + test PostgreSQL (M1.5.1; supersedes the deferral
+in D-031 for the marketplace journey).** `apps/e2e` pins `@playwright/test` 1.64.0 and Chromium. Servers run on ports
+3100 (web) and 4100 (API) so they never collide with a developer's servers; the web build is made into `.next-e2e`
+with the API address baked in (`NEXT_DIST_DIR`), leaving the normal `.next` alone. Data: global setup refuses unless
+both DB URLs are local and end in `_test`, empties the database, and seeds one shared catalog (the web caches the
+catalog for 60 s, so per-spec catalogs would be stale); users are registered through the real API and signed in through
+the real login form; assistants go through the real onboarding/review API except email and phone verification, which
+are set in the database exactly as the API e2e suite does (no SMS or inbox dependency). Expired requests are INSERTed
+already expired (the server clock cannot be faked from a browser and requests are immutable). Teardown empties the
+database again. No production code path was added for tests; the only product-code change is the neutral `distDir`
+option in `next.config.ts`. Still open: the original M1.7 scope (register → verify → login → logout → reset, no-CSP-
+violation assertions) and a first real CI execution (D-032).
 
 **D-012 Payment provider and policies — DEFERRED by the owner on 2026-10-23; required before any real payment implementation (start of Phase 2 payments).** Needs evaluation of current availability and
 requirements for Nigeria (candidates: Paystack, Flutterwave) plus **your decisions** on platform

@@ -123,7 +123,16 @@ export default async function AssistantProfilePage({ params }: Props) {
                     className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-line bg-surface p-3 text-sm"
                   >
                     <span className="font-medium">{task.name}</span>
-                    <EligibilityBadge eligibility={task.eligibility} />
+                    <span className="flex items-center gap-3">
+                      <EligibilityBadge eligibility={task.eligibility} />
+                      <Link
+                        href={`/requests/new?category=${group.category.slug}&task=${task.slug}${a.serviceAreas[0] ? `&city=${a.serviceAreas[0].slug}` : ''}`}
+                        className="font-semibold text-brand-700 underline underline-offset-2"
+                      >
+                        Post a request
+                        <span className="sr-only"> for {task.name}</span>
+                      </Link>
+                    </span>
                   </li>
                 ))}
               </ul>
@@ -164,8 +173,10 @@ export default async function AssistantProfilePage({ params }: Props) {
       </section>
 
       <p className="mt-10 rounded-card border border-line bg-surface p-5 text-sm text-ink-muted">
-        Booking isn’t available yet, and there are no reviews or completed jobs on Qyou so far. This
-        page shows who {a.displayName} is and what they’ll be able to do once bookings open.
+        How it works: you post a request, and every approved assistant who serves that area and
+        offers the task can send you a quote. You choose one. Payment and booking confirmation are
+        not available yet, so nothing is charged, and there are no reviews or completed jobs on Qyou
+        so far.
       </p>
     </main>
   );

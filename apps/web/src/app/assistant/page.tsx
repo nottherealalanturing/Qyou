@@ -6,7 +6,7 @@ import { Checklist } from '@/components/assistant/checklist';
 import { PrivateDetailsForm } from '@/components/assistant/private-details-form';
 import { ProfileForm } from '@/components/assistant/profile-form';
 import { Section } from '@/components/assistant/section';
-import { ServicesForm, type CatalogForForm } from '@/components/assistant/services-form';
+import { ServicesForm } from '@/components/assistant/services-form';
 import { StartApplication } from '@/components/assistant/start-application';
 import { StatusBanner } from '@/components/assistant/status-banner';
 import { SubmitPanel } from '@/components/assistant/submit-panel';
@@ -14,23 +14,11 @@ import { UnavailableState } from '@/components/catalog/states';
 import { Alert } from '@/components/ui/alert';
 import { buttonClasses } from '@/components/ui/button';
 import type { OwnDashboard } from '@/lib/assistants';
-import { fetchCategories, fetchCategory, fetchCities } from '@/lib/catalog';
+import { loadCatalog } from '@/lib/catalog-tree';
 import { apiAuthed } from '@/lib/server-api';
 import { getSession } from '@/lib/session';
 
 export const metadata: Metadata = { title: 'Become an assistant' };
-
-async function loadCatalog(): Promise<CatalogForForm | null> {
-  const [cities, categories] = await Promise.all([fetchCities(), fetchCategories()]);
-  if (cities.status !== 'ok' || categories.status !== 'ok') return null;
-  const detailed = await Promise.all(categories.data.items.map((c) => fetchCategory(c.slug)));
-  return {
-    cities: cities.data.items,
-    categories: detailed.flatMap((d) =>
-      d.status === 'ok' ? [{ category: d.data.category, tasks: d.data.tasks }] : [],
-    ),
-  };
-}
 
 export default async function AssistantDashboardPage() {
   const session = await getSession();
@@ -122,13 +110,23 @@ export default async function AssistantDashboardPage() {
 
         <Section
           id="eligibility"
-          title="Paid jobs"
-          description="Paid jobs aren’t open yet. When they are, you can accept them only if every condition below is met."
+          title="Quoting on requests"
+          description="You can browse open requests and send quotes only if every condition below is met. Payments aren’t open yet, so a quote is a proposal only."
         >
           {dash.eligibility.eligibleForPaidJobs ? (
-            <p className="flex items-center gap-2 font-medium text-success">
-              <span aria-hidden="true">✓</span> You meet every requirement to accept paid jobs.
-            </p>
+            <div className="space-y-3">
+              <p className="flex items-center gap-2 font-medium text-success">
+                <span aria-hidden="true">✓</span> You meet every requirement to quote on requests.
+              </p>
+              <p className="flex flex-wrap gap-3">
+                <Link href="/assistant/requests" className={buttonClasses('primary', 'sm')}>
+                  Open requests
+                </Link>
+                <Link href="/assistant/quotes" className={buttonClasses('secondary', 'sm')}>
+                  My quotes
+                </Link>
+              </p>
+            </div>
           ) : (
             <ul className="list-disc space-y-1 pl-5 text-sm text-ink-muted">
               {dash.eligibility.reasons.map((r) => (

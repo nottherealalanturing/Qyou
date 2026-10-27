@@ -14,6 +14,9 @@ const securityHeaders = [
 ];
 
 const nextConfig: NextConfig = {
+  // The browser test suite builds into its own directory (with its own baked-in API address) so it
+  // never overwrites, or is overwritten by, a developer's normal `.next` build.
+  distDir: process.env.NEXT_DIST_DIR || '.next',
   poweredByHeader: false,
   reactStrictMode: true,
   async rewrites() {

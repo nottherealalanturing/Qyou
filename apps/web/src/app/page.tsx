@@ -105,13 +105,14 @@ export default async function HomePage() {
           </h2>
           <ul className="mt-3 space-y-2 text-ink-muted">
             <li>
-              <strong className="text-ink">Available now:</strong> browse places and see what can
-              and can’t be delegated.
+              <strong className="text-ink">Available now:</strong> browse places, see what can and
+              can’t be delegated, find approved assistants, post a request and compare the quotes
+              you receive.
             </li>
             <li>
-              <strong className="text-ink">Coming next:</strong> choosing an assistant and booking.
-              Approved assistants can be browsed, but booking isn’t open, so there are no bookings
-              on Qyou yet.
+              <strong className="text-ink">Not available yet:</strong> payment, booking confirmation
+              and messaging. Accepting a quote doesn’t charge anything, and there are no completed
+              bookings, reviews or ratings on Qyou yet.
             </li>
           </ul>
         </div>

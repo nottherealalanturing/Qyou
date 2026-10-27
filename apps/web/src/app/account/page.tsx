@@ -84,12 +84,43 @@ export default async function AccountPage() {
         ) : (
           <div className="mt-2 space-y-4">
             <Alert tone="info">
-              Verify your email address to book assistants and receive booking updates. We sent a
-              link to <strong className="break-all">{user.email}</strong>.
+              Verify your email address to post requests and receive quotes. We sent a link to{' '}
+              <strong className="break-all">{user.email}</strong>.
             </Alert>
             <ResendVerification email={user.email} />
           </div>
         )}
+      </section>
+
+      <section aria-labelledby="requests-heading" className={`mt-6 ${card}`}>
+        <h2 id="requests-heading" className="text-lg font-semibold">
+          Requests
+        </h2>
+        <p className="mt-1 text-ink-muted">
+          Post what you need done and approved assistants send you quotes. Nothing is charged yet.
+        </p>
+        <p className="mt-4 flex flex-wrap gap-x-6 gap-y-2">
+          <Link
+            href="/requests"
+            className="font-semibold text-brand-700 underline underline-offset-2"
+          >
+            My requests
+          </Link>
+          <Link
+            href="/requests/new"
+            className="font-semibold text-brand-700 underline underline-offset-2"
+          >
+            Post a request
+          </Link>
+          {user.role === 'ASSISTANT' ? (
+            <Link
+              href="/assistant/requests"
+              className="font-semibold text-brand-700 underline underline-offset-2"
+            >
+              Open requests I can quote on
+            </Link>
+          ) : null}
+        </p>
       </section>
 
       <section aria-labelledby="assistant-heading" className={`mt-6 ${card}`}>

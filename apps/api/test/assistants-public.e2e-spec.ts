@@ -139,7 +139,10 @@ describe('Assistants: public profiles and the public/private boundary (e2e, real
         'languages',
         'slug',
         'summary',
+        'tasks', // added in M1.5 so a card shows what the assistant offers
       ]);
+      // Each listed task is only a name and slugs: no ids, no eligibility notes, nothing internal.
+      expect(Object.keys(item.tasks[0]).toSorted()).toEqual(['categorySlug', 'name', 'slug']);
       const profile = (await publicGet(a.slug)).body.assistant;
       expect(Object.keys(profile).toSorted()).toEqual([
         'availability',

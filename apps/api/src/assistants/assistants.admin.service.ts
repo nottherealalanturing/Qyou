@@ -10,6 +10,7 @@ import type { PublicUser, RequestContext } from '../auth/auth.types.js';
 import { validationFailed } from '../common/http/validation-error.js';
 import { skipTake, toPage } from '../common/pagination.js';
 import type { ApplicationStatus, Prisma } from '../generated/prisma/client.js';
+import { lockAssistantForChange } from './eligibility-locks.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import {
   allowedTransition,
@@ -218,6 +219,12 @@ export class AssistantsAdminService {
     ctx: RequestContext,
   ) {
     return this.prisma.$transaction(async (tx) => {
+      const owner = await tx.assistantProfile.findUnique({
+        where: { id },
+        select: { userId: true },
+      });
+      if (!owner) throw new NotFoundException('Application not found');
+      await lockAssistantForChange(tx, owner.userId);
       const profile = await tx.assistantProfile.findUnique({ where: { id } });
       if (!profile) throw new NotFoundException('Application not found');
       if (profile.userId === actor.id)
@@ -272,6 +279,13 @@ export class AssistantsAdminService {
    */
   async transition(actor: PublicUser, id: string, dto: TransitionDto, ctx: RequestContext) {
     return this.prisma.$transaction(async (tx) => {
+      const owner = await tx.assistantProfile.findUnique({
+        where: { id },
+        select: { userId: true },
+      });
+      if (!owner) throw new NotFoundException('Application not found');
+      // First lock of the transaction: quoting/selection decisions on this assistant now wait for us.
+      await lockAssistantForChange(tx, owner.userId);
       const profile = await tx.assistantProfile.findUnique({
         where: { id },
         include: { user: true },

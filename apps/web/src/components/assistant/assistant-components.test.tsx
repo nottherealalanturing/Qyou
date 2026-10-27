@@ -473,12 +473,30 @@ describe('static presentation', () => {
           languages: [{ code: 'en', name: 'English' }],
           cities: [{ slug: 'lagos', name: 'Lagos', state: 'Lagos' }],
           categories: [{ slug: 'banks', name: 'Banks', iconKey: 'bank' }],
+          tasks: [
+            'Hold your place',
+            'Open an account',
+            'Submit documents',
+            'Collect a card',
+            'Pay a bill',
+          ].map((name) => ({
+            slug: name.toLowerCase().replace(/ /g, '-'),
+            name,
+            categorySlug: 'banks',
+          })),
         }}
       />,
     );
     expect(out).toContain('href="/assistants/ada-1"');
     expect(out).toContain('Ada O.');
     expect(out).toContain('Speaks English');
+    // The card says what they offer and where, and caps the list instead of overflowing.
+    expect(out).toContain('Hold your place');
+    expect(out).toContain('Collect a card');
+    expect(out).not.toContain('Pay a bill');
+    expect(out).toContain('+1 more');
+    expect(out).toContain('Serves');
+    expect(out).toContain('Lagos');
     expect(out).not.toMatch(/phone|email|legal|@/i);
   });
 });

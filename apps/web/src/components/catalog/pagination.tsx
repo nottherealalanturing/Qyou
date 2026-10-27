@@ -7,17 +7,22 @@ export function Pagination({
   totalPages,
   params,
   basePath = '/search',
+  hrefFor,
 }: {
   page: number;
   totalPages: number;
-  params: SearchParams;
+  params?: SearchParams;
   basePath?: string;
+  /** Build the link for a page yourself (used by pages whose filters are not the catalog's). */
+  hrefFor?: (page: number) => string;
 }) {
   if (totalPages <= 1) return null;
-  const href = (target: number) => {
-    const query = searchQueryString({ ...params, page: target });
-    return query ? `${basePath}?${query}` : basePath;
-  };
+  const href =
+    hrefFor ??
+    ((target: number) => {
+      const query = searchQueryString({ ...params, page: target });
+      return query ? `${basePath}?${query}` : basePath;
+    });
   const base =
     'inline-flex h-10 items-center rounded-xl border border-ink/25 px-4 text-sm font-semibold hover:border-ink';
   return (

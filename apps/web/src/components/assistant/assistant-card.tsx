@@ -1,6 +1,5 @@
 import Link from 'next/link';
 import type { PublicAssistantCard } from '@/lib/assistants';
-import { CategoryIcon } from '../catalog/category-icon';
 
 export function Avatar({
   name,
@@ -19,6 +18,8 @@ export function Avatar({
   );
 }
 
+const MAX_TASKS_SHOWN = 4;
+
 export function AssistantCard({ assistant }: { assistant: PublicAssistantCard }) {
   return (
     <Link
@@ -29,22 +30,30 @@ export function AssistantCard({ assistant }: { assistant: PublicAssistantCard })
         <Avatar name={assistant.displayName} />
         <div className="min-w-0">
           <h3 className="truncate text-lg font-semibold tracking-tight">{assistant.displayName}</h3>
-          <p className="truncate text-sm text-ink-muted">
+          <p className="text-sm text-ink-muted">
+            <span className="sr-only">Serves </span>
             {assistant.cities.map((c) => c.name).join(', ')}
           </p>
         </div>
       </div>
       <p className="mt-3 line-clamp-3 text-sm text-ink-muted">{assistant.summary}</p>
-      <ul className="mt-4 flex flex-wrap gap-2" aria-label="Types of place">
-        {assistant.categories.map((c) => (
+      <h4 className="mt-4 text-xs font-semibold uppercase tracking-wide text-ink-muted">
+        Can help with
+      </h4>
+      <ul className="mt-2 flex flex-wrap gap-2" aria-label="Tasks offered">
+        {assistant.tasks.slice(0, MAX_TASKS_SHOWN).map((t) => (
           <li
-            key={c.slug}
-            className="inline-flex items-center gap-1.5 rounded-full bg-brand-50 px-3 py-1 text-xs font-medium text-brand-700"
+            key={`${t.categorySlug}/${t.slug}`}
+            className="rounded-full bg-brand-50 px-3 py-1 text-xs font-medium text-brand-700"
           >
-            <CategoryIcon iconKey={c.iconKey} className="h-3.5 w-3.5" />
-            {c.name}
+            {t.name}
           </li>
         ))}
+        {assistant.tasks.length > MAX_TASKS_SHOWN ? (
+          <li className="rounded-full px-1 py-1 text-xs font-medium text-ink-muted">
+            +{assistant.tasks.length - MAX_TASKS_SHOWN} more
+          </li>
+        ) : null}
       </ul>
       <p className="mt-auto pt-4 text-xs text-ink-muted">
         Speaks {assistant.languages.map((l) => l.name).join(', ')}

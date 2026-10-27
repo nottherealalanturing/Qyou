@@ -434,13 +434,216 @@ table (column-level encryption / KMS is Phase 6); no profile photo (no storage);
 live without moderation; the same admin may record an identity check and approve (dual control is recommended
 and recorded as a launch gate); retention/deletion of private details after rejection is not yet automated.
 
+### Service requests, quotes and assistant discovery (M1.5 — implemented; design note written before the migration)
+
+**Baseline inspected (HEAD `6527dd8`, clean tree; `pnpm check` exit 0 with 137 API unit / 451 API e2e / 105 web tests).**
+Already present from M1.4: public `GET /assistants` (city, category filters) and `/assistants/:slug`, a pure
+`decideEligibility` plus `AssistantEligibilityService` (`evaluate`, `canServeTask`), the global
+`@RequireAssistantEligibility()` guard, `@Roles`/`@RequireVerifiedEmail`, `AuditService.record(event, tx)`,
+Postgres rate limiter, and `applyVenueRestrictions`. M1.5 extends these; it adds no parallel implementation.
+
+**Product shape.** A _customer_ posts a **service request** for one delegable task in one city (optionally at a
+real approved venue). Any currently-eligible assistant who offers that task and serves that city (and is not
+barred by a venue rule) can see it and send a **quote** (a priced proposal). The customer **selects exactly one**
+quote. Nothing is charged: selection ends in status `QUOTE_ACCEPTED`, which is where Phase 2 payment and
+booking will start. There are no directed/invited requests, messaging, payments, fees or reviews in M1.5.
+
+**Entities** (all IDs UUIDv7, `timestamptz`, money = integer kobo):
+
+```
+User 1──* ServiceRequest *──1 EligibleTask        (Restrict FKs everywhere; no hard deletes)
+                    │ *──1 City, *──0..1 ServiceLocation
+                    └ 1──* Quote *──1 AssistantProfile
+```
+
+- `ServiceRequest`: `customerId`, `taskId`, `cityId` (always set; equals the venue's city when a venue is
+  given), `locationId?`, `description` (private, ≤ 1000), `constraints?` (private, ≤ 500), `scheduleKind`
+  (`FLEXIBLE` | `ON_DATE`), `preferredDate?` + `preferredPeriod` (`ANY|MORNING|AFTERNOON|EVENING`) — a calendar
+  date in the city's timezone, not an instant, so there is no timezone arithmetic in the UI —
+  `expiresAt` (server-computed: end of the preferred date, or creation + 14 days for flexible requests),
+  `authorizationConfirmedAt?`, `status`, `statusChangedAt`, `acceptedAt?`, `closedAt?`, `closureReason?`.
+- `Quote`: `requestId`, `assistantId` (the profile; its `userId` is the owner), `amountKobo` (int), `currency`
+  (`NGN` only, DB-checked; a documented placeholder for the unresolved currency policy), `message?`, `status`,
+  `statusChangedAt`.
+- Statuses never come from a client. There is no generic PATCH.
+
+**Request lifecycle** (`ServiceRequestStatus`; anything else is 409):
+
+| From                                 | To               | Who                           | Notes                                                                                            |
+| ------------------------------------ | ---------------- | ----------------------------- | ------------------------------------------------------------------------------------------------ |
+| _(create)_                           | `OPEN`           | customer                      | task delegable, venue/task/city consistent, venue rule not prohibiting, caps/rate limits         |
+| `OPEN`                               | `QUOTED`         | system (first quote)          | in the quote transaction                                                                         |
+| `QUOTED`                             | `OPEN`           | system (last quote withdrawn) | reversible                                                                                       |
+| `QUOTED`                             | `QUOTE_ACCEPTED` | customer                      | one `PENDING` quote becomes `ACCEPTED`, every other `PENDING` becomes `NOT_SELECTED`, atomically |
+| `OPEN` / `QUOTED` / `QUOTE_ACCEPTED` | `CANCELLED`      | customer                      | reason required once a quote was accepted; all live quotes become `REQUEST_CLOSED`               |
+
+`EXPIRED` is **derived, not stored**: an `OPEN`/`QUOTED` request whose `expiresAt` has passed accepts no quotes and
+cannot have one selected (409), is hidden from assistants' feeds and is shown to its owner as "expired". No
+background job rewrites rows (none exists yet). **Reopening is not supported** (safest reversible default:
+create a new request); reversibility comes from withdraw-and-requote and `QUOTED → OPEN`. A request cannot be edited
+after creation, because quotes were priced against its text; cancel and recreate.
+
+**Quote lifecycle** (`QuoteStatus`): `PENDING → ACCEPTED` (customer select) · `PENDING → NOT_SELECTED` (another
+quote was selected) · `PENDING → WITHDRAWN` (assistant) · `PENDING|ACCEPTED → REQUEST_CLOSED` (request cancelled).
+An assistant may quote again after withdrawing (a new row; at most 3 quote rows per assistant per request and 20 live
+quotes per request).
+
+**Who can do what** (non-owners and non-participants get **404**, never 403, so ids cannot be probed):
+
+| Action                                | Actor                                                                                                         |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Create / list / view / cancel request | role `CUSTOMER` or `ASSISTANT`, verified email, **owner only** (an assistant is also a customer under D-025)  |
+| View quotes on a request, select one  | the request owner                                                                                             |
+| Browse open requests, view one, quote | `@RequireAssistantEligibility()` **and** the request matches (task offered, city served, venue rule), not own |
+| View a request after quoting          | the quoting assistant (even if no longer matching), only their own quote                                      |
+| Withdraw a quote                      | the quote's owner                                                                                             |
+
+Assistants never see the customer's name, email or any contact data. The description is visible only to matching,
+eligible assistants and the owner; it is never in a public response, an audit row or a log. Descriptions that contain
+an email address or a 9+ digit run (phone/ID-like) are rejected so contact details are not exchanged around Qyou.
+
+**Concurrency.** Every state-changing request/quote operation runs in one transaction that first takes
+`SELECT … FROM service_requests WHERE id = $1 FOR UPDATE`, then re-reads status, expiry and quotes, then writes.
+That serialises submit / withdraw / select / cancel per request, so two concurrent selections cannot both win: the
+second sees `QUOTE_ACCEPTED` and gets 409. Database backstops (they hold even if application code is wrong):
+partial unique index `quotes(requestId) WHERE status = 'ACCEPTED'` (one accepted quote), partial unique index
+`quotes(requestId, assistantId) WHERE status IN ('PENDING','ACCEPTED')` (no duplicate active quote), CHECK
+constraints on schedule/status/timestamp consistency and `amountKobo > 0`, a trigger that rejects a
+non-delegable task or a venue whose city/category contradict the request, and a trigger that rejects a quote by the
+request's own customer or on a request that is not `OPEN`/`QUOTED`. Creation takes a row lock on the customer's `users`
+row to enforce the "at most 10 live requests" cap without a race.
+
+**Discovery semantics.** `GET /assistants` gains `task` (requires `category`; task slugs are unique only per category),
+`language` (one of the declared codes), `q` (case-insensitive literal match on display name and bio, ≤ 80 chars,
+wildcards escaped) and `location` (an approved venue: implies its city and category and excludes assistants whose
+only offers in that category are prohibited at the venue). Filters combine with AND; "serves the city" and "offers the
+task" are independent facts (offers are not per-city). Order stays `approvedAt desc, id asc` — no ranking signal exists.
+**Eligibility equivalence:** the list query is a database predicate (`publicAssistantWhere`) kept next to
+`decideEligibility`; a test builds an assistant for every way of failing each rule and asserts that membership in the
+public list/profile is exactly `evaluate().eligibleForPaidJobs`. Quote submission and selection do not use the
+predicate: they call `AssistantEligibilityService` itself (now with an optional transaction client) and the
+venue-aware `canServeRequest`.
+
+**Indexes.** `service_requests(customerId, createdAt desc)`, `(status, cityId, taskId, expiresAt)` for the feed,
+`quotes(requestId, status)`, `quotes(assistantId, createdAt desc)`, the two partial uniques above.
+Runtime role: `SELECT/INSERT/UPDATE`; **`DELETE` is revoked** on both tables.
+
+**Audit** (same transaction as the change; metadata is ids, enums and counts only — never description, constraints,
+message or closure text): `service_request.created`, `service_request.cancelled`, `quote.submitted`,
+`quote.withdrawn`, `quote.accepted`.
+
+**Privacy.** Public endpoints never join requests or quotes. Request ids are not exposed publicly. Venue names are
+public data already (approved venues). The quote price and message are visible to the quoting assistant and the
+request owner only.
+
+**API surface (all under `/api/v1`).**
+
+| Endpoint                                                               | Access                                         | Purpose                                                                               |
+| ---------------------------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `GET /assistants`                                                      | public, 60 s success-only cache                | + `task` (needs `category`), `language`, `q`, `location`; cards list tasks and cities |
+| `POST /service-requests`                                               | role CUSTOMER/ASSISTANT, verified email, CSRF  | Create (validates task, city/venue consistency, venue rules, schedule)                |
+| `GET /service-requests`, `GET /service-requests/:id`                   | owner only (404 otherwise)                     | My requests (status filter, pagination); one request with every quote                 |
+| `POST /service-requests/:id/cancel`                                    | owner, verified email                          | Cancel; reason required once a quote is accepted                                      |
+| `POST /service-requests/:id/quotes/:quoteId/select`                    | owner, verified email                          | Accept one quote atomically                                                           |
+| `GET /assistants/me/requests`                                          | `@RequireAssistantEligibility()`               | Open requests this assistant may quote on                                             |
+| `GET /assistants/me/requests/:id`                                      | matching eligible assistant, or one who quoted | One request (no customer identity); 404 otherwise                                     |
+| `POST /assistants/me/requests/:id/quotes`                              | eligible assistant, verified email             | Send a quote                                                                          |
+| `GET /assistants/me/quotes`, `POST /assistants/me/quotes/:id/withdraw` | quote owner                                    | My quotes; withdraw a pending quote (works even if no longer eligible)                |
+
+There is no PATCH/PUT/DELETE on requests or quotes and no endpoint accepts a status, an owner id, an expiry or a
+total from a client (strict schemas reject unknown keys). Ids in paths are UUIDs (malformed ⇒ 400; well-formed but not
+yours ⇒ 404).
+
+**Web pages.** `/assistants` (filters: city, task/category, language, keyword; cards list tasks and areas;
+empty/error/pagination states), `/assistants/[slug]` (public profile; "Post a request" per task), `/requests`,
+`/requests/new` (prefilled from `category`, `task`, `city`, `location` query parameters), `/requests/[id]`
+(quotes cheapest first, confirm-then-accept, cancel), `/assistant/requests`, `/assistant/requests/[id]` (quote form,
+withdraw), `/assistant/quotes`. The header wraps on narrow screens (found overflowing at 375 px during the browser run).
+
+**Implementation notes that differ in detail from the design note.** Submitting a quote on a request that expired
+returns 409 ("no longer accepting quotes") while its detail/feed entry is already 404; the 404 rule applies to requests
+the assistant never could see. The feed predicate encodes venue prohibitions positively (a per-task `OR`, with "no
+venue" its own branch) because `NOT IN` against NULL would silently drop rows without a venue. A malformed id is a
+400 from the UUID pipe, not a 404.
+
+**Tests added in M1.5.** Unit: schedule/expiry arithmetic (incl. Lagos midnight), request/quote transition tables,
+contact-detail tripwire. API e2e on real PostgreSQL with the runtime role: customer-side requests (auth, roles,
+validation, venues, caps, ownership, derived expiry, cancellation, audit); quotes and selection (feed visibility,
+eligibility, duplicates, self-quote, closed requests, atomic selection, concurrent selection/cancel/duplicate races,
+withdrawal, privacy, audit payloads, feed ≡ `canServe`); discovery (every filter, combinations, pagination,
+`location`, list ≡ `evaluate` for a control plus 13 ineligible states, public-field scan); database invariants (permissions, triggers,
+CHECKs, partial uniques, RESTRICT). Web: money/schedule/search-parameter helpers, form and action components,
+summary rendering.
+
+**Known limitations (M1.5).** No payment, booking, messaging or notifications (assistants poll; customers must
+revisit). No background expiry (derived at read time). Requests/quotes cannot be edited. A selected quote cannot be
+withdrawn by its assistant, only closed by the customer's cancellation. Quote and request text is not moderated.
+_(M1.5.1 closed three M1.5 limitations: the eligibility race, the untested pending-quote cap and the missing browser
+suite; see the next section. Acceptance is still not a promise that the assistant stays eligible: Phase 2 must
+re-check at booking.)_
+
+**Explicitly deferred (unresolved, documented):** payment provider, fees/commission and currency policy (the `NGN`
+column is a placeholder, not a decision); booking entity and the payment-driven part of the state machine;
+background expiry; reopening; editing requests/quotes; directed requests; messaging and notifications (assistants poll
+their feed; emails need the outbox, D-020); ratings (none exist); geo-distance matching; dual-admin approval;
+private-data retention and encryption; real SMS and identity providers.
+
+### Marketplace hardening and browser tests (M1.5.1)
+
+**Eligibility concurrency protocol (D-052).** Quote submission and selection decide eligibility from many rows, so the
+request lock alone cannot make the decision safe. Records and modes:
+
+| Who                                                                                                                                                          | Lock (in this order)                                                                                     | Mode                |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- | ------------------- |
+| `submitQuote`, `selectQuote` (readers)                                                                                                                       | 1. `service_requests` row                                                                                | `FOR UPDATE`        |
+|                                                                                                                                                              | 2. `eligible_tasks` + `service_categories` (task of the request), `cities`, `service_locations` (if any) | `FOR SHARE`         |
+|                                                                                                                                                              | 3. `users` row of the assistant                                                                          | `FOR SHARE`         |
+| Assistant-scoped writers: admin transition (approve/reject/suspend), identity outcome, role assignment, `setServices`, `setPrivateDetails` (phone), `submit` | `users` row of the assistant — **first statement** of the transaction                                    | `FOR NO KEY UPDATE` |
+| Venue restriction add/remove                                                                                                                                 | `service_locations` row                                                                                  | `FOR NO KEY UPDATE` |
+| City / task / category / venue updates                                                                                                                       | the row itself (the `UPDATE` takes it)                                                                   | implicit            |
+
+Helpers: `apps/api/src/assistants/eligibility-locks.ts` (`lockForEligibilityDecision`, `lockAssistantForChange`,
+`lockVenueForChange`). Transactions use PostgreSQL's default `READ COMMITTED`: each statement sees everything committed
+so far, so once the locks are held `canServe` reads the latest committed state and nothing that can revoke it can commit
+until the decision transaction ends. Readers do not block each other (`SHARE`/`SHARE`), so only work on the same
+assistant or catalog row is ordered. Deadlocks: every transaction takes locks in the single order above and each writer
+holds at most one lock before writing, so there is no cycle and no retry logic. `lock_timeout` is not set (waits are
+short: one transaction). **Guarantee:** a quote is never submitted, and never accepted, on an eligibility state that a
+change committed before the decision commits has invalidated. A change that arrives during the decision waits and then
+commits after it (accepted-then-suspended is a legal order; booking re-checks). Granting changes (email/phone
+verification) take no lock because a stale "ineligible" is the safe direction. Not covered: eligibility changes made by
+raw SQL that bypass the application writers (the database trigger only checks `APPROVED` at quote insert).
+Tests (`test/eligibility-concurrency.e2e-spec.ts`, 14) hold an owner-role transaction open with one side's lock and
+uncommitted change, start the other side through the real HTTP API, wait until PostgreSQL reports it blocked on a lock,
+release, and assert both the response and the persisted rows — for suspension, offers, phone revocation, closed city,
+deactivated task and venue prohibition against both submit and select, and for each writer against an in-flight
+decision. Disabling the assistant `FOR SHARE` makes 9 of them fail.
+
+**Pending-quote cap (D-053).** Count and insert run under the request's `FOR UPDATE`; `test/quote-cap.e2e-spec.ts` (7)
+uses 25 fully approved assistants through the API: 19→20 accepted, 21st rejected with 409, a withdrawal frees exactly one
+slot, concurrent racers never exceed 20, withdraw racing submit stays consistent. Removing the request lock fails the
+concurrent cases.
+
+**Cancellation reason (D-054).** Unchanged: required only after a quote was accepted (whitespace = none), enforced by the
+API (400 on `reason`), mirrored by the UI label, covered by API, component and browser tests. Owner decision pending.
+
+**Browser suite (D-055).** `apps/e2e` (Playwright 1.64.0, Chromium) drives the real login form against the real API and a
+production web build, both started by Playwright's `webServer` on ports 4100/3100, backed by the dedicated `qyou_test`
+database. 19 tests: customer discovery → filter → profile → request (with a rejected contact-detail attempt) → two
+assistants quote → compare → accept (+ database assertions); assistant feed → quote validation → quote → My quotes →
+withdraw → re-quote; anonymous redirects, cross-customer 404s, wrong-city assistant, customer/draft applicant 403,
+assistant suspended while the form is open, customer told a suspended assistant can't be chosen; cancelled, accepted,
+expired requests (no quotes, no selection); cancellation reason rules in the UI; private-field and competitor-quote
+boundaries on pages and API JSON; 375px layout (no horizontal overflow, controls on-screen) and tap-through quote and
+accept flows. It is not a visual-regression suite and covers one browser engine.
+
 ## Planned backend modules (design intent)
 
 `auth · users · assistants · verification · service-categories · service-locations ·
 service-requests · matching · bookings · tracking · messaging · payments · reviews · disputes ·
 notifications · favorites · wait-reports · virtual-queues · businesses · admin`
 
-Implemented so far: `auth`, `authz`, `admin`, `assistants` (profiles, onboarding, phone + identity verification workflow), `service-categories`, `service-locations`, `seed` (with
+Implemented so far: `auth`, `authz`, `admin`, `assistants` (profiles, onboarding, phone + identity verification workflow), `service-requests` (requests, quotes, selection), `service-categories`, `service-locations`, `seed` (with
 `audit`, `mail`, rate limiting as shared infrastructure) and `health`. Rules: one module per cohesive responsibility, not per noun; modules depend on each other through
 exported services only; no circular dependencies; business rules live in domain services (not
 controllers); create modules when their phase starts, not before. `rewards` (Stellar) is
@@ -524,5 +727,5 @@ history) as part of the rebuild.
   fake endpoints to the product. Concurrency is tested with real parallel requests and, for the
   rate limiter, independent connection pools standing in for multiple API instances.
 - Web: unit tests for logic and jsdom component tests (React Testing Library, StrictMode);
-  Playwright browser e2e from M1.7.
+  Playwright browser e2e in `apps/e2e` (D-055; see "Marketplace hardening and browser tests (M1.5.1)").
 - Gate: `pnpm check` locally and the same steps in `.github/workflows/ci.yml`.

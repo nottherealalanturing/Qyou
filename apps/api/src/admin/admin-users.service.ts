@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
 import type { PublicUser, RequestContext } from '../auth/auth.types.js';
+import { lockAssistantForChange } from '../assistants/eligibility-locks.js';
 import type { Prisma, UserRole } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 
@@ -58,6 +59,7 @@ export class AdminUsersService {
       throw new ForbiddenException('You cannot change your own role');
     }
 
+    await lockAssistantForChange(tx, targetId);
     const target = await tx.user.findUnique({ where: { id: targetId } });
     if (!target) throw new NotFoundException('User not found');
     if (target.role === 'ADMIN') {

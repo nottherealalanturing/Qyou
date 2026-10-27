@@ -64,6 +64,28 @@ facts. Legal name, phone, email and verification evidence are never public. Avai
 cannot be delegated are never offered or advertised, and venue restrictions still apply.
 No ratings, reviews, response times or "verified" claims exist until the underlying data does.
 
+## Requests, quotes and what "accepted" means (M1.5)
+
+- A customer posts a **request** for one delegable task in one city (optionally at an approved venue), with a
+  description, optional constraints and a date preference. Tasks that cannot be delegated, and tasks a venue
+  prohibits, cannot be requested. Tasks that need the customer's authorization require the customer to confirm
+  they will provide it.
+- Any assistant who is **currently eligible**, offers that task, serves that city and is not barred by a venue
+  rule can see the request and send a **quote**: a priced proposal. Assistants never see who the customer is, and a
+  request's text is visible only to matching assistants and its owner. Names, phone numbers, emails, links and
+  ID-like numbers are not allowed in free text.
+- The customer **accepts exactly one quote**; the others are closed. Accepting a quote is **not a booking and not a
+  payment**: nothing is charged, no one is told by email, and there is no messaging yet. The request simply
+  reaches "Quote accepted", which is where booking and payment will start in Phase 2.
+- Requests expire (at the end of the chosen day, or after two weeks if flexible). They cannot be edited; cancel and post
+  again. A cancelled request is final. A customer may cancel at any time; **a reason is required only after they have
+  accepted a quote** (blank counts as none). This is the behaviour designed in M1.5 and kept unchanged; whether it
+  should be a product rule, or a reason should always be required, is an **open owner decision** (D-054).
+- Prices are whatever the assistant proposes (₦100–₦500,000 as a sanity range). Qyou's fees, commission, taxes,
+  refunds and currency policy are **not decided**; the product must not imply any of them until D-012 is resolved.
+- Discovery lists only eligible assistants and shows only what they chose to publish, plus coarse facts Qyou
+  verified. It has no ratings, reviews, response times or "top" badges because none of that data exists.
+
 ## Commercial model
 
 Commission on completed bookings with transparent pricing: assistant service fee + platform

@@ -2,6 +2,7 @@ import { ConflictException, Injectable, NotFoundException } from '@nestjs/common
 import { AuditService } from '../audit/audit.service.js';
 import type { PublicUser, RequestContext } from '../auth/auth.types.js';
 import { changedFields, changesToData } from '../common/audit-diff.js';
+import { lockVenueForChange } from '../assistants/eligibility-locks.js';
 import { isUniqueViolation } from '../common/db-errors.js';
 import { validationFailed } from '../common/http/validation-error.js';
 import { skipTake, toPage } from '../common/pagination.js';
@@ -302,6 +303,7 @@ export class ServiceLocationsAdminService {
   ) {
     try {
       return await this.prisma.$transaction(async (tx) => {
+        await lockVenueForChange(tx, locationId);
         const location = await tx.serviceLocation.findUnique({ where: { id: locationId } });
         if (!location) throw new NotFoundException('Location not found');
 
@@ -348,6 +350,7 @@ export class ServiceLocationsAdminService {
     ctx: RequestContext,
   ) {
     await this.prisma.$transaction(async (tx) => {
+      await lockVenueForChange(tx, locationId);
       const existing = await tx.locationRestriction.findFirst({
         where: { id: restrictionId, locationId },
         include: { location: true },

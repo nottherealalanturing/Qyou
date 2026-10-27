@@ -1,0 +1,25 @@
+{
+  "name": "@qyou/e2e",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Browser end-to-end tests (Playwright) for the Qyou marketplace",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "browsers": "playwright install chromium",
+    "build:web": "API_BASE_URL=http://localhost:4100/api/v1 NEXT_DIST_DIR=.next-e2e pnpm --filter @qyou/web build",
+    "build:api": "pnpm --filter @qyou/api build",
+    "prepare:e2e": "pnpm build:api && pnpm build:web",
+    "e2e": "playwright test",
+    "e2e:headed": "playwright test --headed",
+    "e2e:report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.0",
+    "@qyou/config": "workspace:*",
+    "@types/node": "^24.19.2",
+    "@types/pg": "^8.15.5",
+    "pg": "^8.16.3",
+    "typescript": "~6.0.3"
+  }
+}

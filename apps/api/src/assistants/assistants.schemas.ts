@@ -129,11 +129,33 @@ const slugFilter = z
   .max(100)
   .regex(/^[a-z0-9-]+$/, 'Invalid slug')
   .optional();
-export const publicAssistantQuerySchema = z.object({
-  city: slugFilter,
-  category: slugFilter,
-  ...pageParams,
-});
+export const publicAssistantQuerySchema = z
+  .object({
+    city: slugFilter,
+    category: slugFilter,
+    /** Task slugs are unique only within a category, so a task filter needs its category. */
+    task: slugFilter,
+    language: z.enum(languageCodes, 'Choose from the listed languages').optional(),
+    /** Literal, case-insensitive match on display name and bio. */
+    q: z
+      .string()
+      .transform((v) => v.normalize('NFC').trim())
+      .pipe(
+        z
+          .string()
+          .min(1)
+          .max(80)
+          .regex(/^[^\p{C}]+$/u, 'Search text contains invalid characters'),
+      )
+      .optional(),
+    /** An approved venue: implies its city and category, and drops tasks the venue prohibits. */
+    location: slugFilter,
+    ...pageParams,
+  })
+  .refine((v) => !v.task || v.category, {
+    message: 'Choose a category when filtering by task',
+    path: ['task'],
+  });
 
 export class CreateDraftDto extends createZodDto(createDraftSchema) {}
 export class UpdateProfileDto extends createZodDto(updateProfileSchema) {}

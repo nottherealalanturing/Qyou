@@ -38,6 +38,7 @@ export interface PublicAssistantCard {
   languages: { code: string; name: string }[];
   cities: { slug: string; name: string; state: string }[];
   categories: { slug: string; name: string; iconKey: string }[];
+  tasks: { slug: string; name: string; categorySlug: string }[];
 }
 
 export interface PublicAssistantProfile {

@@ -56,3 +56,56 @@ jobs:
           pnpm --filter @qyou/web start &
           for i in $(seq 1 30); do curl -sf -o /dev/null http://localhost:3000/login && break; sleep 1; done
           pnpm --filter @qyou/web verify:headers
+
+  # Real-browser end-to-end tests (Playwright) against a real API, a production web build and the
+  # same PostgreSQL service/role setup as above. Kept separate so a browser problem is not confused
+  # with a unit/e2e failure, and so it can be re-run on its own. See docs/RUNBOOK.md ("Browser tests").
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: qyou
+          POSTGRES_PASSWORD: qyou_ci_password
+          POSTGRES_DB: qyou_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U qyou -d qyou_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://qyou_runtime:qyou_runtime_dev_password@localhost:5432/qyou_test?schema=public
+      TEST_DATABASE_URL: postgresql://qyou_runtime:qyou_runtime_dev_password@localhost:5432/qyou_test?schema=public
+      TEST_ADMIN_DATABASE_URL: postgresql://qyou:qyou_ci_password@localhost:5432/qyou_test?schema=public
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Create the runtime database roles
+        run: psql "postgresql://qyou:qyou_ci_password@localhost:5432/postgres" -v ON_ERROR_STOP=1 -f docker/dev-db-roles.sql
+      - name: Apply migrations to the test database (as the owner role)
+        run: pnpm db:deploy:test
+      - name: Install the pinned Chromium (and its system libraries)
+        run: pnpm --filter @qyou/e2e exec playwright install --with-deps chromium
+      - name: Build the API and the web app for the browser suite
+        run: pnpm e2e:build
+      - name: Run the browser suite
+        run: pnpm e2e
+      - name: Keep the report when the suite fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            apps/e2e/playwright-report
+            apps/e2e/test-results
+          if-no-files-found: ignore
+          retention-days: 7
