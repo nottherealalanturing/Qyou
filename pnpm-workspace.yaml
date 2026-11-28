@@ -7,3 +7,8 @@ allowBuilds:
   '@prisma/engines': true
   prisma: true
   '@scarf/scarf': false # analytics-only postinstall
+
+# Security pin: @prisma/config (latest 7.10.1) requires effect 3.20.0, which has a high-severity
+# advisory (GHSA-7589-6fvf-x4pw, fixed in 3.22.1). Remove once Prisma ships a fixed version itself.
+overrides:
+  '@prisma/config>effect': 3.22.4
