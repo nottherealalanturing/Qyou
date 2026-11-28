@@ -28,7 +28,35 @@ describe('describeError', () => {
 
   it('never surfaces server error details', () => {
     expect(describeError(500, { message: 'insert into users …' })).not.toContain('insert');
-    expect(describeError(403, { message: 'x' })).toMatch(/blocked/);
+  });
+
+  it('words each 403 for what it is, never with server text', () => {
+    expect(
+      describeError(403, { code: 'ASSISTANT_NOT_ELIGIBLE', message: 'internal reason 42' }),
+    ).toBe('You are not currently eligible to do this. Check your application for what is needed.');
+    expect(describeError(403, { code: 'EMAIL_NOT_VERIFIED' })).toMatch(/Verify your email/);
+    expect(describeError(403, { message: 'Cross-site request blocked' })).toMatch(/blocked/);
+    const generic = describeError(403, { message: 'secret detail from the server' });
+    expect(generic).toBe('You do not have permission to do this.');
+    expect(generic).not.toContain('secret');
+  });
+
+  it('words 401 and 404 without exposing details', () => {
+    expect(describeError(401, {})).toBe('Please log in again to continue.');
+    expect(describeError(401, { message: 'Invalid email or password' })).toBe(
+      'Invalid email or password',
+    );
+    const missing = describeError(404, { message: 'Request not found: row 123' });
+    expect(missing).toMatch(/could not find that/);
+    expect(missing).not.toContain('123');
+  });
+
+  it('treats unexpected statuses as our problem, with fixed text', () => {
+    for (const status of [500, 502, 504]) {
+      expect(describeError(status, { message: 'stack trace at db.ts:42' })).toBe(
+        'Something went wrong on our side. Please try again in a moment.',
+      );
+    }
   });
 });
 

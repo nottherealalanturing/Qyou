@@ -17,6 +17,9 @@ import { CurrentUser } from './current-user.decorator.js';
 import { Public } from './public.decorator.js';
 import { SessionCookieService } from './session-cookie.service.js';
 
+/** Same words for every address (D-056). The web UI repeats them; a test pins the pair. */
+const GENERIC_REGISTER_MESSAGE =
+  'Thanks. Check your inbox for an email from Qyou with what to do next. It can take a few minutes. Then log in to continue.';
 const GENERIC_RESET_MESSAGE =
   'If an account exists for that email, we have sent a link to reset the password.';
 
@@ -40,17 +43,22 @@ export class AuthController {
 
   @Public()
   @Post('register')
+  @HttpCode(202)
   @RateLimit({ name: 'register', limit: 10, windowSeconds: 60 * 60 })
-  @ApiOperation({ summary: 'Create a customer account and sign in' })
+  @ApiOperation({
+    summary: 'Request a customer account (identical response for every address; no session)',
+  })
   @ApiBody(zodBodySchema(RegisterDto))
-  @ApiResponse({ status: 201, description: 'Account created; session cookie set' })
-  @ApiResponse({ status: 409, description: 'Email already registered' })
-  async register(
-    @Body() dto: RegisterDto,
-    @Req() req: Request,
-    @Res({ passthrough: true }) res: Response,
-  ): Promise<{ user: PublicUser }> {
-    return this.startSession(res, await this.auth.register(dto, contextOf(req)));
+  @ApiResponse({
+    status: 202,
+    description:
+      'Accepted. Says nothing about whether the address was already registered; the next step arrives by email. No session cookie is set: log in afterwards.',
+  })
+  @ApiResponse({ status: 400, description: 'The input itself is invalid' })
+  @ApiResponse({ status: 429, description: 'Too many registration requests from this address' })
+  async register(@Body() dto: RegisterDto, @Req() req: Request): Promise<{ message: string }> {
+    await this.auth.register(dto, contextOf(req));
+    return { message: GENERIC_REGISTER_MESSAGE };
   }
 
   @Public()

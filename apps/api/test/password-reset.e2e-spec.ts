@@ -47,7 +47,7 @@ describe('Auth: password reset (e2e, real PostgreSQL)', () => {
     api.post('/auth/password-reset/confirm', { token, password });
 
   beforeEach(async () => {
-    await api.register({ email, name: 'Reset Me' }).expect(201);
+    await api.register({ email, name: 'Reset Me' }).expect(202);
     // Registration sends a verification email; these tests are about reset mail only.
     await waitForMail(ctx.mail, 1);
     ctx.mail.sent.length = 0;
@@ -208,7 +208,7 @@ describe('Auth: password reset (e2e, real PostgreSQL)', () => {
     });
 
     it('does not let a token for one account affect another', async () => {
-      await api.register({ email: 'other@example.test' }).expect(201);
+      await api.register({ email: 'other@example.test' }).expect(202);
       const token = await issueToken(email);
       await confirm(token).expect(200);
       await api.login('other@example.test', STRONG_PASSWORD).expect(200);

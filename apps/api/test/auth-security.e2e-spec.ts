@@ -48,8 +48,8 @@ describe('Auth: secrets never leak (e2e, real PostgreSQL)', () => {
     const newPassword = 'logs-new-passphrase-9917';
     const output = captureOutput();
     try {
-      const reg = await api.register({ email, name: 'Log Check' }).expect(201);
-      const session = sessionTokenFrom(reg)!;
+      await api.register({ email, name: 'Log Check' }).expect(202);
+      const session = sessionTokenFrom(await api.login(email, STRONG_PASSWORD).expect(200))!;
       await api.login(email, 'wrong-password-LOGSECRET').expect(401);
       await api.login(email, STRONG_PASSWORD, { token: session }).expect(200);
       await api.post('/auth/password-reset/request', { email }).expect(202);
@@ -101,11 +101,12 @@ describe('Auth: secrets never leak (e2e, real PostgreSQL)', () => {
 
   it('never includes the password hash in any user-facing response', async () => {
     const email = 'shape@example.test';
-    const reg = await api.register({ email }).expect(201);
-    const token = sessionTokenFrom(reg)!;
+    const reg = await api.register({ email }).expect(202);
+    expect(reg.body).not.toHaveProperty('user');
     const login = await api.login(email, STRONG_PASSWORD).expect(200);
+    const token = sessionTokenFrom(login)!;
     const me = await api.me(token).expect(200);
-    for (const body of [reg.body, login.body, me.body]) {
+    for (const body of [login.body, me.body]) {
       expect(Object.keys(body.user).toSorted()).toEqual([
         'createdAt',
         'email',

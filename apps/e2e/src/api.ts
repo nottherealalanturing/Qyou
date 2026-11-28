@@ -63,11 +63,16 @@ export async function ok(
   return res;
 }
 
+/**
+ * Registers through the public API (202 and no session by design, D-056), then signs in with the
+ * same password to get the session fixtures need.
+ */
 export async function register(email: string, name: string): Promise<Account> {
-  const res = await ok(201, 'POST', '/auth/register', { email, name, password: PASSWORD });
+  await ok(202, 'POST', '/auth/register', { email, name, password: PASSWORD });
+  const res = await ok(200, 'POST', '/auth/login', { email, password: PASSWORD });
   const cookie = res.headers.getSetCookie().find((c) => c.startsWith('qyou_session='));
   const token = cookie?.split(';')[0]?.slice('qyou_session='.length);
-  if (!token) throw new Error('Registration returned no session cookie');
+  if (!token) throw new Error('Login returned no session cookie');
   return {
     id: res.body.user.id,
     email,

@@ -188,11 +188,14 @@ describe('audit_logs integrity (e2e, real PostgreSQL)', () => {
   });
 
   describe('audit writes are transactional with the change they describe', () => {
-    it('rolls the audit row back together with a failed operation', async () => {
+    it('writes no registration audit row for a repeated address, only the existing-account note', async () => {
       await createUser(api, { email: 'dup@example.test' });
       const before = await ctx.prisma.auditLog.count({ where: { action: 'auth.register' } });
-      await api.register({ email: 'dup@example.test' }).expect(409);
+      await api.register({ email: 'dup@example.test' }).expect(202);
       expect(await ctx.prisma.auditLog.count({ where: { action: 'auth.register' } })).toBe(before);
+      expect(
+        await ctx.prisma.auditLog.count({ where: { action: 'auth.register.existing_account' } }),
+      ).toBe(1);
     });
   });
 });

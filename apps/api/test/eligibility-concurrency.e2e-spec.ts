@@ -7,8 +7,13 @@ import {
 import { makeLocation } from './support/reference.js';
 import {
   approvedAssistant,
+  completeProfile,
   makeCatalog,
   move,
+  recordIdentity,
+  startApplication,
+  submitted,
+  verifyPhone,
   type Applicant,
   type Catalog,
 } from './support/assistants.js';
@@ -317,6 +322,93 @@ describe('Eligibility concurrency protocol (e2e, real PostgreSQL)', () => {
         ),
       );
       expect(res.status).toBe(201);
+    });
+  });
+
+  describe('the remaining writers of eligibility inputs also wait for an in-flight decision', () => {
+    /** Holds the reader-side locks of a decision on `userId` for a fresh request. */
+    async function decisionOn(userId: string) {
+      const id = await openRequest(api, alice, catalog);
+      const target = await targetOf(id);
+      return holdOpen((tx) => lockForEligibilityDecision(tx, userId, target));
+    }
+
+    it('the admin role endpoint', async () => {
+      const res = await raceAgainst(await decisionOn(ada.user.id), () =>
+        api.patch(`/admin/users/${ada.user.id}/role`, { role: 'CUSTOMER' }, as(admin)),
+      );
+      expect(res.status).toBe(200);
+      expect(
+        (await ownerPrisma().user.findUniqueOrThrow({ where: { id: ada.user.id } })).role,
+      ).toBe('CUSTOMER');
+    });
+
+    it('recording an identity outcome', async () => {
+      const applicant = await submitted(ctx, api, catalog, 'Gina Review');
+      await move(api, admin, applicant.profileId, 'UNDER_REVIEW').expect(200);
+      const res = await raceAgainst(await decisionOn(applicant.user.id), () =>
+        recordIdentity(api, admin, applicant.profileId, 'FAILED'),
+      );
+      expect(res.status).toBe(201);
+      const profile = await ownerPrisma().assistantProfile.findUniqueOrThrow({
+        where: { id: applicant.profileId },
+      });
+      expect(profile.identityOutcome).toBe('FAILED');
+    });
+
+    it('submitting an application', async () => {
+      const applicant = await startApplication(api, 'Hana Draft');
+      await completeProfile(api, applicant, catalog);
+      await verifyPhone(ctx, api, applicant);
+      const res = await raceAgainst(await decisionOn(applicant.user.id), () =>
+        api.post('/assistants/me/submit', {}, as(applicant.user)),
+      );
+      expect(res.status).toBe(200);
+      const profile = await ownerPrisma().assistantProfile.findUniqueOrThrow({
+        where: { id: applicant.profileId },
+      });
+      expect(profile.status).toBe('SUBMITTED');
+    });
+
+    const catalogDecision = async () => {
+      const id = await openRequest(api, alice, catalog);
+      const target = await targetOf(id);
+      return holdOpen((tx) => lockForEligibilityDecision(tx, ada.user.id, target));
+    };
+
+    it('deactivating the task', async () => {
+      const res = await raceAgainst(await catalogDecision(), () =>
+        api.patch(`/admin/eligible-tasks/${catalog.hold.id}`, { isActive: false }, as(admin)),
+      );
+      expect(res.status).toBe(200);
+    });
+
+    it('deactivating the category', async () => {
+      const res = await raceAgainst(await catalogDecision(), () =>
+        api.patch(
+          `/admin/service-categories/${catalog.category.id}`,
+          { isActive: false },
+          as(admin),
+        ),
+      );
+      expect(res.status).toBe(200);
+    });
+
+    it('archiving the venue', async () => {
+      const venue = await makeLocation({
+        cityId: catalog.city.id,
+        categoryId: catalog.category.id,
+      });
+      const id = await openRequest(api, alice, catalog, {
+        cityId: undefined,
+        locationId: venue.id,
+      });
+      const target = await targetOf(id);
+      const held = holdOpen((tx) => lockForEligibilityDecision(tx, ada.user.id, target));
+      const res = await raceAgainst(held, () =>
+        api.patch(`/admin/service-locations/${venue.id}`, { status: 'ARCHIVED' }, as(admin)),
+      );
+      expect(res.status).toBe(200);
     });
   });
 

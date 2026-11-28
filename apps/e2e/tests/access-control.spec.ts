@@ -178,7 +178,7 @@ test.describe('authorization and eligibility boundaries', () => {
     await page.getByRole('button', { name: 'Send quote' }).click();
     await expect(page.getByRole('heading', { name: 'Your quote' })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Send quote' })).toBeVisible();
-    await expect(page.locator('main')).toContainText('Your request was blocked');
+    await expect(page.locator('main')).toContainText('You are not currently eligible to do this');
     expect(
       (
         await db().query('SELECT count(*)::int AS n FROM quotes WHERE "assistantId" = $1', [

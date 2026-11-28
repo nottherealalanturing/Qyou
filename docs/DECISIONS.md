@@ -110,7 +110,7 @@ admin bootstrap reports `emailSent: false` explicitly, and tokens are 24 h/30 mi
 Phase 3 notifications, designed as an outbox that stores template + recipient and mints the token
 at send time (so no secret is stored) with retries and a dead-letter view.
 
-**D-021 Enumeration-safe registration is a LAUNCH REQUIREMENT (decided 2026-10-23; scheduled as
+**D-021 Enumeration-safe registration is a LAUNCH REQUIREMENT — implemented in M1.8, see D-056 (decided 2026-10-23; scheduled as
 M1.8, before Phase 2 and in any case before public launch).** Today registration returns 409 for an
 existing email, so anyone can test whether an address has an account (rate-limited at 10/h/IP;
 login, password reset and verification are already enumeration-safe). That is acceptable for
@@ -382,8 +382,10 @@ task-specific prohibitions and venues prohibited after posting. Alternative: eva
 
 **D-050 Privacy of requests and quotes.** Customers' names, emails and ids never appear in any assistant-facing
 response; a request's text is visible only to its owner, matching eligible assistants and an assistant who already
-quoted. A request or quote that is not yours is 404 (identical to a missing one), including for admins, who get no
-access to request data at all. Audit rows hold ids, enums, counts and quote amounts only — never description,
+quoted. A request or quote that is not yours is 404 (identical to a missing one) for customers and assistants.
+Administrators and business staff are refused with **403** by the role gate on every request and quote endpoint (the
+web pages show them a 404), so they get no access to request data at all; verified by `service-requests.e2e-spec.ts`
+("is for customers and assistants only") and the browser privacy spec. Audit rows hold ids, enums, counts and quote amounts only — never description,
 constraints, quote message or cancellation reason. The public API never joins requests or quotes.
 
 **D-051 The runtime database role cannot DELETE requests or quotes.** The product has no deletion; `REVOKE DELETE`
@@ -426,8 +428,9 @@ withdraw racing submit, mutation-checked by removing the lock) are the control.
 the API, the UI label ("required: an assistant was chosen") and the tests agree, and a whitespace-only reason counts as
 none. The owner has not ratified this as product policy, and there is no D-entry before this one. **Decision needed
 from the owner:** keep it, or require a reason on every cancellation (and whether repeated cancellations are
-moderated). Until then nothing changes. (Also noted: the UI shows the generic "Your request was blocked" for any 403,
-including "no longer eligible".)
+moderated). Until then nothing changes. (The generic "Your request was blocked" message that the UI showed for every 403 was replaced in the
+acceptance review: `describeError` now words 401/403/404/unexpected statuses separately, using the API's existing
+`code` values `ASSISTANT_NOT_ELIGIBLE` and `EMAIL_NOT_VERIFIED`, and never shows raw server text for them.)
 
 **D-055 Browser suite: Playwright, real API + production web build + test PostgreSQL (M1.5.1; supersedes the deferral
 in D-031 for the marketplace journey).** `apps/e2e` pins `@playwright/test` 1.64.0 and Chromium. Servers run on ports
@@ -441,6 +444,36 @@ already expired (the server clock cannot be faked from a browser and requests ar
 database again. No production code path was added for tests; the only product-code change is the neutral `distDir`
 option in `next.config.ts`. Still open: the original M1.7 scope (register → verify → login → logout → reset, no-CSP-
 violation assertions) and a first real CI execution (D-032).
+
+**D-056 Enumeration-safe registration (M1.8; implements D-021).** _Baseline audited first:_ `POST /auth/register` answered
+**201 + a session cookie + the user** for a new address and **409 "An account with this email already exists"** for an
+existing one (case-insensitive, any status), and the web form turned the 409 into "This email is already registered.
+Try logging in instead." That was a direct, rate-limited (10/h/IP) existence oracle. Login (identical 401 with a dummy
+hash for unknown addresses; suspended = same 401), password-reset request (identical 202), verification confirm (one
+generic error) and the failed-login counters (applied to unknown addresses too) were already neutral. _Contract now:_
+for any well-formed body the endpoint returns **202** with exactly `{ "message": <one fixed sentence> }` and **no
+cookie**, whether the address is new, verified, unverified, suspended or in a case/Unicode variant. A 400 still reports
+only what is wrong with the input itself; a 429 is per IP and does not depend on the address. _What differs is only in the
+owner's inbox:_ a new address gets one verification link (account created unverified); an existing **active** account gets
+one "You already have a Qyou account" note with login and forgot-password links (no token, no status wording); a
+**suspended** account gets nothing (an invitation to log in or reset would mislead). An existing account is never
+changed (no password, name, role or status update, no session, no new token). _Abuse limits:_ besides 10/h/IP, a
+per-address limiter (3/h, shared by new and existing addresses) silently drops further attempts (same 202, no account, no
+mail), so the limit is not an oracle and the endpoint cannot flood an inbox. _Timing:_ the password is hashed first on
+every path, so the dominant cost is equal; what remains is a few database round trips (one insert transaction versus one
+lookup). We do not claim perfect equality. _UX consequence (decided here, as D-021 left it open):_ no instant session;
+the web shows "Check your email" and the user logs in (login works before verification; the account page keeps the
+verification prompt). _Audit:_ a new account is `auth.register` as before; a repeat is `auth.register.existing_account`
+(no actor, target = the existing user id, no submitted name/password/email in the row). _Endpoints that legitimately
+reveal account state:_ `GET /auth/me`, the email-verification resend and every `/account` action (the caller is
+authenticated and sees only their own state); `/admin/*` (administrators only, audited); public assistant profiles
+reveal that a profile exists, never an email or account status. _Known remaining limitations:_ (1) address squatting
+(someone can register a victim's address with their own password before the victim; the victim's verification link would
+then verify an account the squatter can log into; the victim recovers it with "forgot password", which also verifies the
+address) is not addressed here; (2) the 3/h per-address limit lets an attacker burn the quota for a victim's address for
+an hour; (3) password-reset requests still skip the account work for unknown addresses, so a fine-grained timing attacker
+may distinguish them (not equalised in M1.8); (4) timing equality is best effort; (5) mail delivery is fire-and-forget
+(D-020), so a failed send is invisible to the caller by design.
 
 **D-012 Payment provider and policies — DEFERRED by the owner on 2026-10-23; required before any real payment implementation (start of Phase 2 payments).** Needs evaluation of current availability and
 requirements for Nigeria (candidates: Paystack, Flutterwave) plus **your decisions** on platform

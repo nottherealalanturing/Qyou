@@ -93,3 +93,32 @@ ${button(link, 'Set your password')}
 <p>If you weren't expecting this, do not use the link and tell your platform owner.</p>`,
   };
 }
+
+export function accountExistsEmail(input: {
+  to: string;
+  name: string;
+  loginLink: string;
+  resetLink: string;
+}): MailMessage {
+  const { to, name, loginLink, resetLink } = input;
+  return {
+    to,
+    subject: 'You already have a Qyou account',
+    text: [
+      `Hi ${name},`,
+      '',
+      'Someone, possibly you, tried to create a Qyou account with this email address.',
+      'You already have one, so nothing was changed.',
+      '',
+      `Log in: ${loginLink}`,
+      `Forgot your password? ${resetLink}`,
+      '',
+      "If this wasn't you, you can ignore this email.",
+    ].join('\n'),
+    html: `<p>Hi ${escapeHtml(name)},</p>
+<p>Someone, possibly you, tried to create a Qyou account with this email address. You already have one, so nothing was changed.</p>
+${button(loginLink, 'Log in')}
+<p><a href="${escapeHtml(resetLink)}">Forgot your password?</a></p>
+<p>If this wasn't you, you can ignore this email.</p>`,
+  };
+}

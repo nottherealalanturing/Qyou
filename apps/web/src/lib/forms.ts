@@ -6,6 +6,7 @@ export type SubmitResult<T> =
 
 interface ApiErrorBody {
   blockers?: unknown;
+  code?: unknown;
   message?: unknown;
   issues?: { path?: unknown; message?: unknown }[];
   retryAfterSeconds?: unknown;
@@ -17,16 +18,31 @@ function retryHint(seconds: unknown): string {
   return ` Try again in about ${minutes} ${minutes === 1 ? 'minute' : 'minutes'}.`;
 }
 
-/** Maps an API error response to text that is safe and useful to show in the UI. */
+/**
+ * Maps an API error response to text that is safe and useful to show in the UI. Only a few messages
+ * are passed through (validation and conflict messages are written for people); 401, 403, 404 and
+ * everything unexpected get fixed wording, so raw server text and internal details never reach the page.
+ */
 export function describeError(status: number, body: ApiErrorBody): string {
   const message = typeof body.message === 'string' ? body.message : undefined;
+  const code = typeof body.code === 'string' ? body.code : undefined;
   if (status === 400)
     return message === 'Validation failed'
       ? 'Please fix the highlighted fields.'
       : (message ?? 'That request was not valid.');
-  if (status === 401 || status === 409) return message ?? 'Something went wrong.';
+  if (status === 401) return message ?? 'Please log in again to continue.';
+  if (status === 409) return message ?? 'Something went wrong.';
   if (status === 503) return message ?? 'This is not available right now.';
-  if (status === 403) return 'Your request was blocked. Reload the page and try again.';
+  if (status === 403) {
+    if (code === 'ASSISTANT_NOT_ELIGIBLE')
+      return 'You are not currently eligible to do this. Check your application for what is needed.';
+    if (code === 'EMAIL_NOT_VERIFIED') return 'Verify your email address first, then try again.';
+    if (message === 'Cross-site request blocked')
+      return 'Your request was blocked. Reload the page and try again.';
+    return 'You do not have permission to do this.';
+  }
+  if (status === 404)
+    return 'We could not find that. It may have been closed or removed, or you may no longer be able to access it.';
   if (status === 413) return 'That request was too large.';
   if (status === 429) return `Too many attempts.${retryHint(body.retryAfterSeconds)}`;
   return 'Something went wrong on our side. Please try again in a moment.';

@@ -34,7 +34,7 @@ pnpm dev:web        # web only      — http://localhost:3000 (/register, /login
 Local email: password-reset mail lands in **Mailpit** — inbox UI http://localhost:8052 (API:
 `GET http://localhost:8052/api/v1/messages`). Nothing is delivered to real addresses.
 
-Manual auth walkthrough: open `/register` → create an account (you land on `/account`) → _Log out_
+Manual auth walkthrough: open `/register` → create an account (you see "Check your email"; registration never signs you in, D-056) → _Log in_ → `/account` → _Log out_
 → `/forgot-password` → open the email in Mailpit → follow the link (token is in the URL
 fragment) → choose a new password → `/login`. Each reset link works once and expires in 30 min.
 
@@ -277,6 +277,34 @@ apps/e2e/test-results/<test>/trace.zip` (screenshots and an `error-context.md` s
   GitHub** (D-032): treat it as configuration until a real run is green.
 - Limits: Chromium only; layout is asserted by measurement (no horizontal overflow, controls inside a 375px screen), not
   by pixel comparison; the server clock can't be faked from a browser, so expired requests are inserted already expired.
+
+## Registration behaviour and testing (M1.8, D-056)
+
+`POST /auth/register` answers **202 with the same sentence and no cookie** for every well-formed request, whether the address is
+new or already registered, so the only way to know what happened is the inbox (Mailpit locally, `http://localhost:8052`):
+a new address gets "Verify your Qyou email address"; an existing active account gets "You already have a Qyou account"
+(login and forgot-password links); a suspended account gets nothing. After registering, log in (login works before the
+address is verified). Per-address limit: after 3 attempts in an hour for the same address, further attempts are dropped
+silently (same 202, no mail, no account) — if a developer "never receives the email", this is why; clear it locally with
+`DELETE FROM rate_limit_counters`. Per-IP limit: 10/hour (429). Test helpers: `signUp(api)` (API e2e) registers and logs in;
+the browser fixtures do the same through the API.
+
+Commands: `pnpm --filter @qyou/api exec vitest run --config vitest.config.e2e.ts test/registration-privacy.e2e-spec.ts`
+(needs the test database), `pnpm --filter @qyou/web test`, and `pnpm e2e` (Playwright; `tests/registration.spec.ts`).
+
+## Running the CI workflow safely (not done yet)
+
+`.github/workflows/ci.yml` (jobs `check` and `browser`) has never executed. Do **not** treat it as passing. Its triggers are
+`push` to `main` and `pull_request`. The local branch and `origin/main` (`Qyoue/Qyou`) **share history up to `cf19ac5`**
+(an earlier version of this section wrongly called them unrelated). Since then the local branch rebuilt the project and
+removed the Stellar-era code, while `origin/main` kept developing that code (31 commits by 2026-11-28), so a merge
+conflicts widely (97 conflicts in a trial `git merge-tree` that day). GitHub does not run `pull_request` workflows for a
+pull request with merge conflicts. How to reconcile the two lines is an owner/maintainer decision.
+Safe options, none performed: (a) push the local branch to a **new, empty private repository** and let CI run on its
+`main`; (b) push a topic branch to `origin` and open a draft pull request, and read only the `CI` workflow's `check` and
+`browser` jobs; (c) add `workflow_dispatch:` to the workflow (a small, separate change) and run it manually. Expect first-run
+differences (Postgres service role setup, `psql` on the runner, Chromium system libraries, ports 3100/4100). Record the
+run URL in PROGRESS only after a run actually succeeds.
 
 ## Troubleshooting
 

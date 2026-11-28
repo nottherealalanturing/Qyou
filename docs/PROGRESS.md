@@ -1,13 +1,62 @@
 # Qyou — Progress
 
-_Last updated: 2026-10-27 (end of M1.5.1 session)._ The code is authoritative; if this file looks
+_Last updated: 2026-10-27 (end of M1.8 session)._ The code is authoritative; if this file looks
 stale, verify against the repository and reconcile.
 
 ## Current state
 
-**Phase 0, M1.1–M1.5 and M1.5.1 complete.** Commits: `5f4699d` (Phase 0 + M1.1), `c7979ed` (M1.2), `b7947b5` (M1.3),
-`6527dd8` (M1.4). **All M1.5 and M1.5.1 work is uncommitted in the working tree** (commits/pushes need
-explicit authorisation); nothing tracked was deleted. No tracked file contains secrets; `.env` files remain git-ignored.
+**Phase 0, M1.1–M1.5, M1.5.1 and M1.8 complete.** Commits: `5f4699d` (Phase 0 + M1.1), `c7979ed` (M1.2), `b7947b5` (M1.3),
+`6527dd8` (M1.4), `5d56a40` (M1.5 and M1.5.1 together: one commit, because their changes overlap in many files). The
+acceptance-review changes (error wording, extra writer-race tests, doc corrections) and all M1.8 work are uncommitted; nothing is pushed
+and CI has never run. Nothing tracked was deleted. No tracked file contains secrets; `.env` files remain git-ignored.
+
+## Dependency security update (2026-11-28)
+
+`next build` began failing on 16.4.2 with `SecurityFatalError` (known advisories, confirmed with `pnpm audit --prod`). Updated
+`next` to `^16.4.6` (only `apps/web/package.json` and the lockfile changed). Executed locally afterwards: `pnpm check` exit 0
+(API unit 162, API e2e 582, web 145, build), browser suite 23 passed on a freshly rebuilt `.next-e2e`, `verify:headers`
+passed (8 pages, port 3200). CI still never run.
+
+**Follow-up the same day: the two remaining high advisories are patched.** `multer` 2.4.0 → 2.5.0 by moving
+`@nestjs/common`, `core`, `platform-express` and `testing` from 12.2.0 to 12.5.0 (the upstream release that requires the
+fixed version; chosen over the 2-day-old 12.6.3). `effect` 3.20.0 → 3.22.4 through an override scoped to
+`@prisma/config` in `pnpm-workspace.yaml` (the latest `@prisma/config`, 7.10.1, still pins 3.20.0; **remove the override
+when Prisma ships a fix**). Executed locally afterwards: `pnpm audit --prod` "No known vulnerabilities found"; `pnpm check`
+exit 0 after deleting build outputs and the generated client (API unit 162, API e2e 582, web 145); browser suite 23
+passed; `verify:headers` passed; all 7 migrations applied to a throwaway Postgres 17; `prisma validate` and a drift check
+on `qyou_test` clean. **Still open:** a full `pnpm audit` (including dev dependencies) reports 1 moderate advisory in
+`minimatch` via `@nestjs/cli` (a build tool; not changed).
+
+## Completed in M1.8 — enumeration-safe registration
+
+- **Baseline (audited before changing anything):** register returned 201 + session for a new address and 409 "An account with
+  this email already exists" for an existing one; the web form said "This email is already registered". Login, reset request,
+  verification confirm and the failed-login counters were already neutral. See D-056.
+- **Contract now:** 202 `{ message }`, no cookie, identical for new / verified / unverified / suspended / case-variant
+  addresses (pinned by tests comparing status, body and every observable header). New address → verification email;
+  existing active account → "you already have an account" note; suspended → no mail; existing accounts never mutated;
+  per-address limit 3/h (silent) plus the 10/h/IP limit; password hashed first on every path; audit `auth.register` vs
+  `auth.register.existing_account`. UX: no instant session, "Check your email" panel, then log in.
+- **Tests added:** 17 API e2e (`registration-privacy.e2e-spec.ts`), 5 web component tests (`register-form.test.tsx`), 4 Playwright
+  (`registration.spec.ts`); `auth*.e2e` specs and fixtures updated for 202 + login (`signUp` helper). **Mutation check:** making
+  the existing-address path throw 409 again fails 11 of the 17; restored.
+- **Remaining limitations:** address squatting, per-address quota burn, reset-request timing for unknown addresses, best-effort
+  timing equality, fire-and-forget mail (D-056).
+
+### M1.8 checks (executed locally, 2026-10-27, `qyou_test` verified first)
+
+| Check                                                         | Result                                      |
+| ------------------------------------------------------------- | ------------------------------------------- |
+| `pnpm check` (format, lint, typecheck, test, test:e2e, build) | **exit 0**                                  |
+| API unit tests                                                | 162 passed (22 files)                       |
+| API e2e (real PostgreSQL, runtime role)                       | **582 passed (26 files)** (565 before, +17) |
+| Web unit + component tests                                    | 145 passed (17 files) (140 before, +5)      |
+| Browser suite (`pnpm e2e:build`, then `pnpm e2e` run twice)   | 23 passed both times (19 before, +4)        |
+| `verify:headers` on the production build (port 3200)          | passed, 8 pages                             |
+| **CI** (`check` and `browser` jobs on GitHub)                 | **configured, never run: not passed**       |
+
+Not repeated this session: the delete-everything clean install (done in the acceptance review before M1.8; dependencies were
+unchanged since), the throwaway-database migration check (there is **no migration** in M1.8: no schema change).
 
 ## Completed in M1.5.1 — marketplace correctness and repeatable browser tests
 
@@ -17,7 +66,7 @@ explicit authorisation); nothing tracked was deleted. No tracked file contains s
   `FOR NO KEY UPDATE` on that user row first (new `assistants/eligibility-locks.ts`; wired into admin transition, identity
   outcome, role assignment, `setServices`, `setPrivateDetails`, `submit`, venue-restriction add/remove). Catalog updates
   conflict through their own row locks. No schema change, no migration.
-- **Race tests (14, deterministic).** `test/eligibility-concurrency.e2e-spec.ts` holds a transaction open with one side's
+- **Race tests (14 at first, 20 after the acceptance review; deterministic).** `test/eligibility-concurrency.e2e-spec.ts` holds a transaction open with one side's
   lock and uncommitted change, fires the other side through the HTTP API, waits until PostgreSQL reports it blocked, then
   releases and asserts the persisted rows. **Mutation check performed:** with the assistant `FOR SHARE` removed, 9 of the
   14 failed; restored byte-for-byte.
@@ -33,28 +82,35 @@ explicit authorisation); nothing tracked was deleted. No tracked file contains s
   database with a refusal guard, documented commands (RUNBOOK → Browser tests), `browser` job in CI (never executed).
   Product-code change: `distDir: process.env.NEXT_DIST_DIR || '.next'` in `next.config.ts` only.
 
-### M1.5.1 checks (actually run, 2026-10-27, against `qyou_test` on the local Postgres 17 container)
+### M1.5.1 checks
 
-| Check                                                                        | Result                                                                                                  |
-| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `pnpm format:check`, `pnpm lint` (`--deny-warnings`), `pnpm typecheck`       | clean                                                                                                   |
-| API unit tests                                                               | 162 passed (22 files)                                                                                   |
-| API e2e (real PostgreSQL, runtime role)                                      | **559 passed (25 files)** = 536 + 14 concurrency + 7 cap + 2 cancellation tests                         |
-| Web unit + component tests                                                   | 133 passed (16 files)                                                                                   |
-| `pnpm build`                                                                 | succeeded                                                                                               |
-| `verify:headers` on the production build (served on 3200: 3000 was occupied) | passed, 8 pages                                                                                         |
-| Clean-database migration check (throwaway Postgres 17 on 5463, then removed) | 7 migrations applied; `migrate status` up to date; `migrate diff` no difference; guard triggers present |
-| Browser suite `pnpm e2e` (two consecutive runs, then the final run)          | 19 passed each time (~23 s)                                                                             |
+Status vocabulary used here: **executed locally** = I ran it on this machine and saw the result; **CI configured** = the
+workflow file exists; **CI passed** = a real GitHub run succeeded (**none exists**).
 
-Not done: a full `pnpm check` from a deleted `node_modules`/`dist`/`.next` (the long clean-install gate used in M1.5 was
-not repeated; the individual steps above were run on the existing install); no CI run (nothing is pushed).
+Acceptance review (2026-10-27), all **executed locally** against `qyou_test` (database name and migration count verified
+first), after deleting `node_modules`, `dist`, `.next`, `.next-e2e`, the generated Prisma client and tsbuildinfo files
+and running `pnpm install --frozen-lockfile`, `pnpm db:roles`, `pnpm db:deploy:test`:
+
+| Check                                                                        | Result                                                      |
+| ---------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `pnpm check` (format, lint, typecheck, test, test:e2e, build)                | **exit 0**                                                  |
+| API unit tests                                                               | 162 passed (22 files)                                       |
+| API e2e (real PostgreSQL, runtime role)                                      | **565 passed (25 files)** (559 + 6 added writer-race tests) |
+| Web unit + component tests                                                   | 140 passed (16 files) (133 + 7 error-wording tests)         |
+| Browser suite: `pnpm e2e:browsers`, `pnpm e2e:build`, `pnpm e2e`             | 19 passed (once in the review, after earlier runs of 19)    |
+| `verify:headers` on the production build (served on 3200: 3000 was occupied) | passed, 8 pages                                             |
+| Browser-suite database guard (non-test database name; non-local host)        | both refused before any query                               |
+| CI `browser` and `check` jobs on GitHub                                      | **CI configured, never run: not passed**                    |
+
+Earlier in M1.5.1 (executed locally in the build session, not repeated in the review): clean-database migration check on
+a throwaway Postgres 17 (7 migrations applied, `migrate diff` no difference), three consecutive green browser runs.
 
 ### Findings worth knowing
 
-- The UI shows "Your request was blocked. Reload the page and try again." for **every** 403, including "you are no longer
-  eligible"; accurate wording needs a UI change (not done, noted in D-054).
-- API returns **403** (not 404) to an administrator calling customer request endpoints (role gate before ownership);
-  no data is exposed either way, but D-050's "404 including for admins" is only literally true for the web pages.
+- ~~The UI showed "Your request was blocked" for every 403~~ — fixed in the acceptance review (see D-054); other statuses
+  (401, 404, 5xx) also have fixed, safe wording now.
+- ~~D-050 said administrators get 404~~ — corrected: the API refuses administrators and business staff with 403 on
+  request/quote endpoints (role gate before ownership); the web pages show 404. No data is exposed either way.
 - The web caches the catalog for 60 s on disk (Next data cache): browser fixtures must seed it once before the first page
   load (done in global setup).
 
@@ -150,7 +206,7 @@ Runtime verification beyond the suites (actually performed):
 **Verification and launch blockers (unchanged and still unresolved):** no real identity-verification provider
 (manual outcome-only review, single reviewer, D-038/D-039); no SMS provider (production phone verification returns 503,
 D-040); no dual-admin approval; legal name/phone not encrypted at rest and no retention/erasure policy (D-043);
-payment provider, fees/commission and refund/payout policy (D-012); enumeration-safe registration (M1.8, D-021);
+payment provider, fees/commission and refund/payout policy (D-012); enumeration-safe registration (done in M1.8; limitations in D-056);
 CI has never run, including the new `browser` job (D-032); mail is fire-and-forget (D-020); audit integrity has the documented owner/superuser limits
 (D-028); local DB owner is a superuser.
 
@@ -159,7 +215,7 @@ CI has never run, including the new `browser` job (D-032); mail is fire-and-forg
 **Owner decisions first (D-054 cancellation-reason policy; D-012 and providers), then M1.6 — Design system foundation and polished core pages** (see ROADMAP), or — if the owner prefers to unblock
 Phase 2 first — the **Phase 2 design ADRs**: booking state machine (starting from `QUOTE_ACCEPTED`), payment-provider
 shortlist and fee/refund/payout policy (D-012). Recommended order: (1) owner decisions on D-012 and on the
-verification/SMS providers; (2) M1.8 enumeration-safe registration; (3) M1.7: extend the existing Playwright suite with
+verification/SMS providers; (2) ~~M1.8 enumeration-safe registration~~ done; (3) M1.7: extend the existing Playwright suite with
 register → verify → login → logout → reset and no-CSP-violation assertions, and get one green CI run; (4) M1.6.
 
 ## Decisions awaiting the owner (do not decide silently)

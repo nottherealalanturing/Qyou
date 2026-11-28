@@ -332,6 +332,32 @@ describe('QuoteForm', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [
+      'an assistant who is no longer eligible (403)',
+      403,
+      { code: 'ASSISTANT_NOT_ELIGIBLE', message: 'You cannot accept paid jobs yet', reasons: [] },
+      /not currently eligible/,
+    ],
+    ['a session that ended (401)', 401, {}, /log in again/],
+    [
+      'a request that closed or changed (404)',
+      404,
+      { message: 'Request not found' },
+      /could not find that/,
+    ],
+    ['a server failure (500)', 500, { message: 'ECONNREFUSED 10.0.0.5:5432' }, /on our side/],
+  ])('gives clear, safe feedback for %s', async (_name, status, body, expected) => {
+    mockFetch(() => json(status, body));
+    render(<QuoteForm requestId="r1" />);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText('Your price (₦)'), '2500');
+    await user.click(screen.getByRole('button', { name: 'Send quote' }));
+    expect(await screen.findByText(expected)).toBeTruthy();
+    expect(screen.queryByText(/blocked/)).toBeNull();
+    expect(screen.queryByText(/ECONNREFUSED|10\.0\.0\.5/)).toBeNull();
+  });
+
   it('shows the API’s message for conflicts (e.g. a duplicate quote)', async () => {
     mockFetch(() => json(409, { message: 'You already have an active quote on this request' }));
     render(<QuoteForm requestId="r1" />);

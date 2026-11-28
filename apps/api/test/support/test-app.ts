@@ -175,6 +175,27 @@ export function client(app: NestExpressApplication) {
   };
 }
 
+/**
+ * Registers through the public API (202, no session by design: D-056) and signs in with the password.
+ * Returns the login response so callers can read the cookie and the user.
+ */
+export async function signUp(
+  api: ReturnType<typeof client>,
+  body: Partial<{ email: string; name: string; password: string }> = {},
+): Promise<{
+  email: string;
+  password: string;
+  res: request.Response;
+  token: string;
+  id: string;
+}> {
+  const email = body.email ?? uniqueEmail();
+  const password = body.password ?? STRONG_PASSWORD;
+  await api.register({ ...body, email, password }).expect(202);
+  const res = await api.login(email, password).expect(200);
+  return { email, password, res, token: sessionTokenFrom(res)!, id: res.body.user.id as string };
+}
+
 export interface TestUser {
   id: string;
   email: string;
@@ -196,7 +217,9 @@ export async function createUser(
   } = {},
 ): Promise<TestUser> {
   const email = options.email ?? uniqueEmail();
-  const res = await api.register({ email, name: options.name ?? 'Test User' }).expect(201);
+  // Registration is enumeration-safe (D-056): it returns 202 and no session, so sign in afterwards.
+  await api.register({ email, name: options.name ?? 'Test User' }).expect(202);
+  const res = await api.login(email, STRONG_PASSWORD).expect(200);
   const id: string = res.body.user.id;
   await ownerPrisma().user.update({
     where: { id },

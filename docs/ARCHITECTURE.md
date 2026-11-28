@@ -54,19 +54,19 @@ OpenAPI at `/docs` and `/docs/openapi.json`. The web client types will be genera
 
 ### Authentication (M1.1, implemented)
 
-| Concern         | Implementation                                                                                                                                                                                                                                                                                                             |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Passwords       | Argon2id (`@node-rs/argon2`, 19 MiB / t=2 / p=1); policy: 10–128 chars + common-password denylist; unknown-account logins burn an equal-cost dummy verification                                                                                                                                                            |
-| Sessions        | Opaque 256-bit random token in an HttpOnly cookie; **only SHA-256(token) is stored** (`sessions`). Absolute TTL 30 d, idle TTL 7 d, `lastSeenAt` refreshed ≤ every 5 min, revocable (`revokedAt`), suspended users rejected on every request                                                                               |
-| Cookie          | `HttpOnly; SameSite=Lax; Path=/`; production adds `Secure` and the `__Host-` prefix (name `__Host-qyou_session`); dev name `qyou_session`                                                                                                                                                                                  |
-| Rotation        | Every login/registration issues a fresh token; a presented existing session is revoked in the same transaction (anti-fixation). Password reset revokes **all** sessions                                                                                                                                                    |
-| CSRF            | `CsrfGuard` (global): state-changing request with an `Origin` outside `CORS_ORIGINS` → 403; cookie present but no `Origin` → 403. Plus SameSite=Lax and JSON-only bodies. No token round-trip needed because every browser sends `Origin` on cross-site POSTs                                                              |
-| Authorization   | `SessionAuthGuard` is **global; routes are private unless `@Public()`**. Roles/resource ownership guards arrive in M1.2                                                                                                                                                                                                    |
-| Reset flow      | 256-bit single-use token, SHA-256 stored, 30-min TTL, newest link wins (row lock on the user), atomic claim via `UPDATE … WHERE usedAt IS NULL AND expiresAt > now()` so concurrent use yields exactly one success; link uses the URL **fragment** (`/reset-password#token=…`), which is not sent to servers or in Referer |
-| Enumeration     | Reset request: identical 202 body for known/unknown/suspended/over-limit addresses, mail sent asynchronously. Login: identical 401, equal-cost verification. **Registration does reveal duplicates (409)** — accepted trade-off for usability                                                                              |
-| Rate limits     | register 10/h/IP · login 30/15 min/IP + 5 failures/15 min per (email, IP) + 20 failures/15 min per email · reset-request 10/h/IP + 3 mails/h/address · reset-confirm 10/15 min/IP                                                                                                                                          |
-| Audit           | `auth.register`, `auth.login.success                                                                                                                                                                                                                                                                                       | failure | blocked`, `auth.logout`, `auth.password_reset.requested | completed` with IP + user agent; never secrets. Failure reasons are internal only |
-| Secrets in logs | Nothing logs bodies; the exception filter logs error name/code only; verified by an e2e test that captures stdout/stderr across every flow                                                                                                                                                                                 |
+| Concern         | Implementation                                                                                                                                                                                                                                                                                                                     |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Passwords       | Argon2id (`@node-rs/argon2`, 19 MiB / t=2 / p=1); policy: 10–128 chars + common-password denylist; unknown-account logins burn an equal-cost dummy verification                                                                                                                                                                    |
+| Sessions        | Opaque 256-bit random token in an HttpOnly cookie; **only SHA-256(token) is stored** (`sessions`). Absolute TTL 30 d, idle TTL 7 d, `lastSeenAt` refreshed ≤ every 5 min, revocable (`revokedAt`), suspended users rejected on every request                                                                                       |
+| Cookie          | `HttpOnly; SameSite=Lax; Path=/`; production adds `Secure` and the `__Host-` prefix (name `__Host-qyou_session`); dev name `qyou_session`                                                                                                                                                                                          |
+| Rotation        | Every login issues a fresh token (registration issues none: D-056); a presented existing session is revoked in the same transaction (anti-fixation). Password reset revokes **all** sessions                                                                                                                                       |
+| CSRF            | `CsrfGuard` (global): state-changing request with an `Origin` outside `CORS_ORIGINS` → 403; cookie present but no `Origin` → 403. Plus SameSite=Lax and JSON-only bodies. No token round-trip needed because every browser sends `Origin` on cross-site POSTs                                                                      |
+| Authorization   | `SessionAuthGuard` is **global; routes are private unless `@Public()`**. Roles/resource ownership guards arrive in M1.2                                                                                                                                                                                                            |
+| Reset flow      | 256-bit single-use token, SHA-256 stored, 30-min TTL, newest link wins (row lock on the user), atomic claim via `UPDATE … WHERE usedAt IS NULL AND expiresAt > now()` so concurrent use yields exactly one success; link uses the URL **fragment** (`/reset-password#token=…`), which is not sent to servers or in Referer         |
+| Enumeration     | Reset request: identical 202 body for known/unknown/suspended/over-limit addresses, mail sent asynchronously. Login: identical 401, equal-cost verification. **Registration (D-056): identical 202 `{message}` and no session for new, verified, unverified and suspended addresses**; the difference is only in the owner's inbox |
+| Rate limits     | register 10/h/IP + 3 attempts/h/address (new and existing alike, then silently dropped) · login 30/15 min/IP + 5 failures/15 min per (email, IP) + 20 failures/15 min per email · reset-request 10/h/IP + 3 mails/h/address · reset-confirm 10/15 min/IP                                                                           |
+| Audit           | `auth.register`, `auth.login.success                                                                                                                                                                                                                                                                                               | failure | blocked`, `auth.logout`, `auth.password_reset.requested | completed` with IP + user agent; never secrets. Failure reasons are internal only |
+| Secrets in logs | Nothing logs bodies; the exception filter logs error name/code only; verified by an e2e test that captures stdout/stderr across every flow                                                                                                                                                                                         |
 
 Endpoints (`/api/v1/auth`): `POST register`, `POST login`, `POST logout` (idempotent, public),
 `GET me`, `POST password-reset/request`, `POST password-reset/confirm`, and (M1.2)
@@ -613,11 +613,11 @@ change committed before the decision commits has invalidated. A change that arri
 commits after it (accepted-then-suspended is a legal order; booking re-checks). Granting changes (email/phone
 verification) take no lock because a stale "ineligible" is the safe direction. Not covered: eligibility changes made by
 raw SQL that bypass the application writers (the database trigger only checks `APPROVED` at quote insert).
-Tests (`test/eligibility-concurrency.e2e-spec.ts`, 14) hold an owner-role transaction open with one side's lock and
+Tests (`test/eligibility-concurrency.e2e-spec.ts`, 20) hold an owner-role transaction open with one side's lock and
 uncommitted change, start the other side through the real HTTP API, wait until PostgreSQL reports it blocked on a lock,
 release, and assert both the response and the persisted rows — for suspension, offers, phone revocation, closed city,
 deactivated task and venue prohibition against both submit and select, and for each writer against an in-flight
-decision. Disabling the assistant `FOR SHARE` makes 9 of them fail.
+decision; the acceptance review added the role endpoint, identity outcome, submit, task, category and venue-status writers. Disabling the assistant `FOR SHARE` makes 9 of the first 14 fail, and making the writer helper take `FOR SHARE` instead of `FOR NO KEY UPDATE` also makes 9 fail (both mutation-checked and restored). Audit (acceptance review): every writer of an eligibility input was traced; `phone-verification`, email verification, password reset/change and `updateProfile`/`setAvailability` do not revoke eligibility and take no lock by design.
 
 **Pending-quote cap (D-053).** Count and insert run under the request's `FOR UPDATE`; `test/quote-cap.e2e-spec.ts` (7)
 uses 25 fully approved assistants through the API: 19→20 accepted, 21st rejected with 409, a withdrawal frees exactly one
@@ -636,6 +636,27 @@ assistant suspended while the form is open, customer told a suspended assistant 
 expired requests (no quotes, no selection); cancellation reason rules in the UI; private-field and competitor-quote
 boundaries on pages and API JSON; 375px layout (no horizontal overflow, controls on-screen) and tap-through quote and
 accept flows. It is not a visual-regression suite and covers one browser engine.
+
+### Public registration contract (M1.8, D-056)
+
+`POST /auth/register` (public, CSRF-checked, 10/h/IP). Request: `{ email, name, password }` (strict, unchanged validation).
+Responses:
+
+| Case                                                                                                                       | Status  | Body                                                                                                                                         | Cookie   |
+| -------------------------------------------------------------------------------------------------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| Invalid input (shape, password rules, unknown fields)                                                                      | 400     | field issues about the input only                                                                                                            | none     |
+| Over the per-IP limit                                                                                                      | 429     | `Retry-After`, same for any address                                                                                                          | none     |
+| **Everything else** (new, verified, unverified, suspended, case/Unicode variants, over the per-address limit, a lost race) | **202** | `{ "message": "Thanks. Check your inbox for an email from Qyou with what to do next. It can take a few minutes. Then log in to continue." }` | **none** |
+
+Flow in `AuthService.register`: (1) hash the password (always); (2) per-address limiter `register-address:<email>` (3/h):
+over it, return; (3) look the address up; if it exists, audit `auth.register.existing_account` and, for an `ACTIVE` account
+only, send the "already have an account" note (login + forgot-password links, no token); (4) otherwise one transaction
+creates the unverified customer, its verification token and the `auth.register` audit row, and the verification email is
+sent after commit; (5) a unique-violation race is treated as (3). Mail is fire-and-forget and never awaited, so delivery
+time does not reach the caller. The web form (`RegisterForm`) shows the API's own sentence in a "Check your email" panel and
+has no status-specific branch. Tests: `registration-privacy.e2e-spec.ts` (17, real PostgreSQL), `auth.e2e-spec.ts`,
+`register-form.test.tsx` (5) and the Playwright spec `registration.spec.ts` (4). Mutation-checked: making the existing-
+address path throw 409 again fails 11 of the 17 API tests. Limitations are listed in D-056.
 
 ## Planned backend modules (design intent)
 

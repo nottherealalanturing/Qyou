@@ -1,10 +1,4 @@
-import {
-  BadRequestException,
-  ConflictException,
-  Injectable,
-  Logger,
-  UnauthorizedException,
-} from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AuditService } from '../audit/audit.service.js';
 import { tooManyRequests } from '../common/rate-limit/rate-limit.guard.js';
@@ -12,7 +6,7 @@ import { RateLimiter } from '../common/rate-limit/rate-limiter.js';
 import type { Env } from '../config/env.js';
 import type { Prisma, User } from '../generated/prisma/client.js';
 import { MailService } from '../mail/mail.service.js';
-import { passwordResetEmail } from '../mail/templates.js';
+import { accountExistsEmail, passwordResetEmail } from '../mail/templates.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { PASSWORD_RESET_TTL_MS, type PublicUser, type RequestContext } from './auth.types.js';
 import { EmailVerificationService } from './email-verification.service.js';
@@ -25,6 +19,8 @@ const FAILURE_WINDOW_MS = 15 * 60 * 1000;
 const MAX_FAILURES_PER_EMAIL_AND_IP = 5;
 const MAX_FAILURES_PER_EMAIL = 20;
 const RESET_EMAILS_PER_ADDRESS_PER_HOUR = 3;
+/** Registration attempts per address (new and existing alike) before further ones are silently dropped. */
+const REGISTRATIONS_PER_ADDRESS_PER_HOUR = 3;
 
 const INVALID_RESET_LINK = 'This reset link is invalid or has expired.';
 
@@ -68,19 +64,47 @@ export class AuthService {
     private readonly config: ConfigService<Env, true>,
   ) {}
 
+  /**
+   * Enumeration-safe registration (D-056). Every well-formed request ends the same way for the
+   * caller (no session, the same 202 body, no error for a taken address), whether the address is new,
+   * already registered, verified, unverified or suspended. What differs happens only in the owner's
+   * inbox: a new address gets a verification link; an existing, active account gets a "you already
+   * have an account" note with login and reset links; anything else gets nothing.
+   *
+   * - The password is hashed FIRST on every path, so the dominant cost does not depend on whether the
+   *   account exists (the remaining difference is a few database round trips; see ARCHITECTURE).
+   * - A per-address limiter counts new and existing addresses alike. Over the limit the request is
+   *   silently dropped: no account, no mail, same response, so the limit is not an oracle and the
+   *   endpoint cannot be used to flood someone's inbox.
+   * - The unique index stays the source of truth: losing a concurrent race is treated as "existing".
+   */
   async register(
     input: { email: string; name: string; password: string },
     ctx: RequestContext,
-  ): Promise<SessionGrant> {
-    // Hash before opening the transaction: it is slow and must not hold a DB connection.
+  ): Promise<void> {
+    // Hash before anything else: it is slow, must not hold a DB connection, and equalises timing.
     const passwordHash = await this.passwords.hash(input.password);
+
+    const withinAddressLimit = (
+      await this.limiter.hit(
+        `register-address:${input.email}`,
+        REGISTRATIONS_PER_ADDRESS_PER_HOUR,
+        60 * 60 * 1000,
+      )
+    ).allowed;
+    if (!withinAddressLimit) return;
+
+    const existing = await this.prisma.user.findUnique({ where: { email: input.email } });
+    if (existing) {
+      await this.noteExistingAccount(existing, ctx);
+      return;
+    }
 
     try {
       const created = await this.prisma.$transaction(async (tx) => {
         const user = await tx.user.create({
           data: { email: input.email, name: input.name, passwordHash },
         });
-        const session = await this.sessions.create(user.id, ctx.userAgent, tx);
         const emailToken = await this.verification.createToken(tx, user);
         await this.audit.record(
           {
@@ -93,26 +117,42 @@ export class AuthService {
           },
           tx,
         );
-        return {
-          user,
-          verificationToken: emailToken,
-          grant: {
-            user: toPublicUser(user),
-            token: session.token,
-            expiresAt: session.expiresAt,
-          },
-        };
+        return { user, verificationToken: emailToken };
       });
       // After commit, so a rolled-back registration never sends mail.
       this.verification.sendEmail(created.user, created.verificationToken);
-      return created.grant;
     } catch (error) {
-      // The unique index is the source of truth, so concurrent duplicate registrations are safe.
-      if (isUniqueViolation(error)) {
-        throw new ConflictException('An account with this email already exists');
-      }
-      throw error;
+      if (!isUniqueViolation(error)) throw error;
+      const raced = await this.prisma.user.findUnique({ where: { email: input.email } });
+      if (raced) await this.noteExistingAccount(raced, ctx);
     }
+  }
+
+  /** Audits the attempt and, for an active account, tells its owner (only) what happened. */
+  private async noteExistingAccount(user: User, ctx: RequestContext): Promise<void> {
+    await this.audit.record({
+      action: 'auth.register.existing_account',
+      targetType: 'user',
+      targetId: user.id,
+      ip: ctx.ip,
+      userAgent: ctx.userAgent,
+    });
+    if (user.status !== 'ACTIVE') return;
+    const base = this.config.get('WEB_BASE_URL', { infer: true });
+    void this.mail
+      .send(
+        accountExistsEmail({
+          to: user.email,
+          name: user.name,
+          loginLink: `${base}/login`,
+          resetLink: `${base}/forgot-password`,
+        }),
+      )
+      .catch((error: unknown) => {
+        this.logger.error(
+          `Failed to send account-exists email (${error instanceof Error ? error.name : 'error'})`,
+        );
+      });
   }
 
   async login(

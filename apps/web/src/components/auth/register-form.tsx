@@ -1,6 +1,6 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { useState, type FormEvent } from 'react';
 import { postJson } from '@/lib/forms';
 import {
@@ -16,11 +16,15 @@ import { TextField } from '../ui/text-field';
 import { PasswordField } from './password-field';
 import { useFocusOnError } from './use-form-focus';
 
+/** Used only if the response body is missing the message; normally the API's own words are shown. */
+const REGISTRATION_SENT_FALLBACK =
+  'Thanks. Check your inbox for an email from Qyou with what to do next. It can take a few minutes. Then log in to continue.';
+
 export function RegisterForm() {
-  const router = useRouter();
   const [errors, setErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [sentMessage, setSentMessage] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const { formRef, alertRef } = useFocusOnError(attempt);
 
@@ -48,22 +52,32 @@ export function RegisterForm() {
     setSubmitting(true);
     const result = await postJson('/api/v1/auth/register', { name, email, password });
     if (result.ok) {
-      router.replace('/account');
-      router.refresh();
+      // The same panel and the same words for every address: the server answers identically
+      // whether or not the address was already registered (D-056), so the page must too.
+      const body = result.data as { message?: unknown } | undefined;
+      setSentMessage(typeof body?.message === 'string' ? body.message : REGISTRATION_SENT_FALLBACK);
+      setSubmitting(false);
       return;
     }
     setSubmitting(false);
-    setErrors(
-      result.status === 409
-        ? { email: 'An account with this email already exists' }
-        : result.fieldErrors,
-    );
-    setFormError(
-      result.status === 409
-        ? 'This email is already registered. Try logging in instead.'
-        : result.message,
-    );
+    setErrors(result.fieldErrors);
+    setFormError(result.message);
     setAttempt((n) => n + 1);
+  }
+
+  if (sentMessage) {
+    return (
+      <div role="status" className="space-y-4">
+        <h2 className="text-xl font-bold tracking-tight">Check your email</h2>
+        <p className="text-ink-muted">{sentMessage}</p>
+        <Link
+          href="/login"
+          className="inline-block font-semibold text-brand-700 underline underline-offset-2"
+        >
+          Go to log in
+        </Link>
+      </div>
+    );
   }
 
   return (

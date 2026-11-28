@@ -6,6 +6,7 @@ import {
   createTestApp,
   resetDatabase,
   sessionTokenFrom,
+  signUp,
   setCookieLine,
   sha256,
   uniqueEmail,
@@ -27,50 +28,47 @@ describe('Auth: registration, login, sessions, CSRF (e2e, real PostgreSQL)', () 
   });
 
   describe('registration', () => {
-    it('creates a customer, signs them in and stores only hashes', async () => {
+    it('creates a customer without signing them in, and stores only hashes', async () => {
       const email = uniqueEmail();
-      const res = await api.register({ email, name: '  Ada Lovelace  ' }).expect(201);
+      const res = await api.register({ email, name: '  Ada Lovelace  ' }).expect(202);
 
-      expect(res.body.user).toMatchObject({ email, name: 'Ada Lovelace', role: 'CUSTOMER' });
-      expect(JSON.stringify(res.body)).not.toMatch(/password|hash/i);
-
-      const cookie = setCookieLine(res);
-      expect(cookie).toMatch(/HttpOnly/i);
-      expect(cookie).toMatch(/SameSite=Lax/i);
-      expect(cookie).toMatch(/Path=\//);
-      expect(cookie).not.toMatch(/Domain=/i);
-      expect(cookie).toMatch(/Expires=/i);
+      // The body is the shared neutral message: no user, no id, nothing about the account.
+      expect(Object.keys(res.body)).toEqual(['message']);
+      expect(JSON.stringify(res.body)).not.toMatch(/password|hash|user|id/i);
+      expect(setCookieLine(res)).toBe('');
+      expect(await ctx.prisma.session.count()).toBe(0);
 
       const user = await ctx.prisma.user.findUniqueOrThrow({ where: { email } });
+      expect(user).toMatchObject({ name: 'Ada Lovelace', role: 'CUSTOMER', status: 'ACTIVE' });
+      expect(user.emailVerifiedAt).toBeNull();
       expect(user.passwordHash).toMatch(/^\$argon2id\$/);
       expect(user.passwordHash).not.toContain(STRONG_PASSWORD);
 
-      const token = sessionTokenFrom(res)!;
+      // The password set at registration works for the first login.
+      const login = await api.login(email, STRONG_PASSWORD).expect(200);
+      const token = sessionTokenFrom(login)!;
       expect(token).toHaveLength(43);
       const session = await ctx.prisma.session.findFirstOrThrow({ where: { userId: user.id } });
       expect(session.tokenHash).toBe(sha256(token));
-      expect(session.tokenHash).not.toBe(token);
 
       const audit = await ctx.prisma.auditLog.findFirst({ where: { action: 'auth.register' } });
       expect(audit?.actorUserId).toBe(user.id);
       expect(JSON.stringify(audit)).not.toContain(STRONG_PASSWORD);
     });
 
-    it('normalises email and rejects a case-variant duplicate with 409', async () => {
-      await api.register({ email: '  Ada@Example.TEST ' }).expect(201);
-      const dup = await api.register({ email: 'ADA@example.test' }).expect(409);
-      expect(dup.body.message).toBe('An account with this email already exists');
+    it('treats a case-variant duplicate exactly like a new address (no 409, one account)', async () => {
+      await api.register({ email: '  Ada@Example.TEST ' }).expect(202);
+      const dup = await api.register({ email: 'ADA@example.test' }).expect(202);
+      expect(dup.body.message).toBeTruthy();
       expect(await ctx.prisma.user.count()).toBe(1);
     });
 
     it('keeps exactly one account under concurrent duplicate registrations', async () => {
       const email = uniqueEmail('race');
       const results = await Promise.all(Array.from({ length: 6 }, () => api.register({ email })));
-      const statuses = results.map((r) => r.status).toSorted();
-      expect(statuses.filter((s) => s === 201)).toHaveLength(1);
-      expect(statuses.filter((s) => s === 409)).toHaveLength(5);
+      expect(results.map((r) => r.status)).toEqual([202, 202, 202, 202, 202, 202]);
       expect(await ctx.prisma.user.count({ where: { email } })).toBe(1);
-      expect(await ctx.prisma.session.count()).toBe(1);
+      expect(await ctx.prisma.session.count()).toBe(0);
     });
 
     it.each([
@@ -128,7 +126,7 @@ describe('Auth: registration, login, sessions, CSRF (e2e, real PostgreSQL)', () 
     });
 
     it('rate-limits registrations per IP (11th within an hour is 429)', async () => {
-      for (let i = 0; i < 10; i++) await api.register().expect(201);
+      for (let i = 0; i < 10; i++) await api.register().expect(202);
       const res = await api.register().expect(429);
       expect(Number(res.headers['retry-after'])).toBeGreaterThan(0);
     });
@@ -137,7 +135,7 @@ describe('Auth: registration, login, sessions, CSRF (e2e, real PostgreSQL)', () 
   describe('login', () => {
     const email = 'login-user@example.test';
     beforeEach(async () => {
-      await api.register({ email }).expect(201);
+      await api.register({ email }).expect(202);
     });
 
     it('signs in with the right password', async () => {
@@ -221,9 +219,9 @@ describe('Auth: registration, login, sessions, CSRF (e2e, real PostgreSQL)', () 
     let token: string;
     let userId: string;
     beforeEach(async () => {
-      const res = await api.register({ email: 'sess@example.test' }).expect(201);
-      token = sessionTokenFrom(res)!;
-      userId = res.body.user.id;
+      const signedUp = await signUp(api, { email: 'sess@example.test' });
+      token = signedUp.token;
+      userId = signedUp.id;
     });
 
     it('rejects unauthenticated requests to protected routes', async () => {
@@ -331,24 +329,24 @@ describe('Auth: registration, login, sessions, CSRF (e2e, real PostgreSQL)', () 
     });
 
     it('blocks cookie-authenticated unsafe requests with no Origin header', async () => {
-      const token = sessionTokenFrom(await api.register().expect(201))!;
+      const token = (await signUp(api)).token;
       await api.logout(token, { origin: null }).expect(403);
       await api.me(token).expect(200); // still signed in
     });
 
     it('blocks cookie-authenticated unsafe requests from a foreign Origin', async () => {
-      const token = sessionTokenFrom(await api.register().expect(201))!;
+      const token = (await signUp(api)).token;
       await api.logout(token, { origin: 'https://evil.example' }).expect(403);
       await api.me(token).expect(200);
     });
 
     it('allows cookie-authenticated requests from the allowed Origin', async () => {
-      const token = sessionTokenFrom(await api.register().expect(201))!;
+      const token = (await signUp(api)).token;
       await api.logout(token, { origin: ALLOWED_ORIGIN }).expect(204);
     });
 
     it('does not restrict safe methods', async () => {
-      const token = sessionTokenFrom(await api.register().expect(201))!;
+      const token = (await signUp(api)).token;
       await api.me(token, { origin: 'https://evil.example' }).expect(200);
     });
   });

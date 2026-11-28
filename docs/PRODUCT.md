@@ -113,7 +113,7 @@ Per-milestone acceptance criteria live in ROADMAP.md and are checked off in PROG
 These are accepted gaps for development/private testing and **must be closed before public launch**
 (tracked as gates in ROADMAP.md):
 
-- **Enumeration-safe registration** — signing up must not reveal whether an email already has an account.
+- ~~Enumeration-safe registration~~ — done in M1.8 (D-056): signing up never reveals whether an email already has an account. Remaining: address squatting and best-effort timing (see D-056).
 - Real payment provider with decided fees, refund/cancellation and payout policy.
 - Reference data (categories, task wording, per-venue restrictions) reviewed by the owner, and real venues
   entered by administrators — Qyou never launches with invented businesses, reviews or wait times.

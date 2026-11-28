@@ -44,9 +44,10 @@ Suggested milestone order (each is a small vertical slice with its own tests):
   web build + test PostgreSQL (D-055). The CI job exists but has never run. See PROGRESS.
 - ⬜ M1.6 Design system foundation (shadcn/ui + Radix evaluation, tokens) and the polished
   homepage, search results, assistant profile, with loading/empty/error states
-- ⬜ **M1.8 Enumeration-safe registration — LAUNCH REQUIREMENT (D-021).** Same neutral response for new and
-  existing addresses, different emails, equal timing, updated web flow and tests. Scheduled before Phase 2
-  starts building on sign-up, and a hard gate for public launch.
+- ✅ **M1.8 Enumeration-safe registration (D-021, D-056).** Same 202 body and no session for every address; a new address gets
+  a verification email, an existing active account gets a "you already have an account" note, a suspended one gets
+  nothing; per-address limit; web "Check your email" panel; API, component and browser tests. Remaining limitations
+  (squatting, best-effort timing) are listed in D-056.
 - ⬜ M1.7 Playwright auth baseline: the framework and the marketplace journey exist (M1.5.1, D-055); still to add
   register→verify→login→logout→reset, assertions of no CSP violations, and a confirmed green CI run.
   _Deferred from M1.2, see D-031._
@@ -82,7 +83,7 @@ performance tests, production deployment docs, growth features, optional Stellar
 
 | Gate                                                                                                                                                                                     | Where tracked     | Status            |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- | ----------------- |
-| Enumeration-safe registration                                                                                                                                                            | M1.8, D-021       | ⬜ scheduled      |
+| Enumeration-safe registration (done in M1.8; limitations in D-056)                                                                                                                       | M1.8, D-056       | ✅                |
 | Payment provider chosen; fees/refund/payout policy decided                                                                                                                               | D-012             | ⬜ owner decision |
 | First real CI run is green                                                                                                                                                               | D-032             | ⬜ needs a push   |
 | Playwright smoke suite in CI (suite exists; CI job never executed)                                                                                                                       | M1.5.1, D-055     | ⬜ needs a push   |
@@ -100,7 +101,7 @@ performance tests, production deployment docs, growth features, optional Stellar
 | Item                                                                                                                                          | Why deferred                                                        | Planned                    |
 | --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | -------------------------- |
 | Transactional email outbox (retries, dead letters)                                                                                            | would persist raw tokens unless redesigned (D-020)                  | Phase 3                    |
-| ~~Enumeration-safe registration (D-021)~~ — now a **launch gate** (M1.8)                                                                      | scheduled, not deferred                                             | M1.8                       |
+| ~~Enumeration-safe registration (D-021)~~ — done in M1.8 (D-056)                                                                              | delivered                                                           | done                       |
 | Admin web UI for reference data (administration is API-only today)                                                                            | M1.3 scope was API + discovery                                      | M1.6 design pass / Phase 6 |
 | Venue submissions by businesses or the community (venues come only from administrators)                                                       | needs moderation and provenance design                              | Phase 4–5                  |
 | Trigram/full-text search, geo-distance sorting, map                                                                                           | volumes don't justify it yet (D-036)                                | Phase 4                    |
